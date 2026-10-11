@@ -1,0 +1,6 @@
+2026-10-11 10:00:01 INFO Application started
+2026-10-11 10:00:05 INFO Database connected
+2026-10-11 10:01:12 ERROR Database connection timeout
+2026-10-11 10:01:15 WARN Retrying database connection
+Older unstructured message retained as an unparsed entry
+2026-10-11 10:01:18 INFO Database connected

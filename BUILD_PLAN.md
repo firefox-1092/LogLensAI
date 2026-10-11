@@ -17,12 +17,16 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - Verify frontend and backend start locally.
 - If PostgreSQL/Docker setup is not available, explain options and get approval before choosing a temporary alternative.
 
-## Phase 2 — Log parsing and persistence
-- Define dataset/log-entry models and migration/setup path.
-- Implement bounded upload validation, parser, and clear parsing summary.
-- Preserve raw lines and line numbers; support unparseable lines.
-- Persist records and implement dataset/log retrieval with pagination.
-- Unit-test parsing and validation using synthetic logs.
+## Phase 2 — Log parsing and persistence (implemented; live PostgreSQL check pending)
+- Define SQLAlchemy dataset/log-entry models and a local table setup path using `Base.metadata.create_all`.
+- Add PostgreSQL Compose service with a named volume, health check, and localhost-only port 5433.
+- Implement bounded `.log`/`.txt` upload validation, UTF-8 decoding, parsing, and parsing summary.
+- Preserve raw lines and original line numbers; retain unsupported records as unparsed.
+- Persist records and implement dataset listing plus filtered, paginated entry retrieval.
+- Add an isolated in-memory SQLite test strategy so tests cannot reset development PostgreSQL data.
+- Add a synthetic sample log and document local database configuration and run commands.
+- [x] Parser, validation, upload/API, persistence, health, filtering, pagination, and frontend build checks pass against the isolated test setup.
+- [ ] Start PostgreSQL through Compose and verify a live PostgreSQL upload after the required settings are added to the local `.env` file.
 
 ## Phase 3 — Deterministic log explorer and analytics
 - Implement severity/text/service/time filters supported by the parser.
