@@ -1,0 +1,4 @@
+2026-10-12 10:00:00 ERROR Connection to 192.168.1.10 timed out
+2026-10-12 10:00:01 ERROR Connection to 192.168.1.11 timed out
+2026-10-12 10:00:02 ERROR Connection to 192.168.1.12 timed out
+2026-10-12 10:00:03 WARN Retrying connection
