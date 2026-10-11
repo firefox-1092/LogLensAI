@@ -2,175 +2,146 @@
 
 **AI-Powered Application Log Analytics and Intelligent Error Analysis Platform**
 
-LogLens turns raw application logs into structured, searchable evidence. It supports uploading `.log` and `.txt` files, parsing a documented timestamp/severity format, storing records in PostgreSQL, browsing them with severity and keyword filters, and reviewing deterministic per-dataset error analytics.
+LogLens is a local web application for uploading `.log` or `.txt` files, exploring parsed records, reviewing deterministic error analytics, and asking an optional hosted AI assistant questions grounded in selected log evidence.
+
+## What is implemented
+
+- Upload UTF-8 `.log` and `.txt` files, parse the documented timestamp/severity/message format, and retain non-empty unparsed lines with their original line numbers and text.
+- Store dataset metadata and entries in PostgreSQL. Uploaded file bytes are not retained separately.
+- Browse and search entries with severity filtering, exact line selection, and pagination.
+- View per-dataset severity counts, error and warning totals, normalized error patterns, and timestamped activity buckets.
+- Ask dataset-scoped questions using Groq or OpenRouter. The backend retrieves bounded evidence and returns answer references. This is keyword-based retrieval, not guaranteed root-cause analysis.
+- Run the backend and frontend locally, or run all three services through Docker Compose. GitHub Actions runs backend tests and a frontend production build.
 
 ## Architecture
 
-- **Frontend:** React, TypeScript, and Vite. The browser sends HTTP requests to FastAPI.
-- **API:** FastAPI with Pydantic response schemas and SQLAlchemy ORM models.
-- **Database:** PostgreSQL 16 in Docker Compose for local development. A named volume keeps data when the container stops.
-- **Containerized application:** Docker Compose can also run the FastAPI backend and a static Nginx frontend. The frontend proxies API requests over the Compose network; the backend reaches PostgreSQL using the `db` service name.
-- **Parser:** a small Python module extracts timestamps, supported severity levels, and messages. It retains unsupported non-empty lines as unparsed records.
-- **Tests:** backend tests use an isolated in-memory SQLite database. They do not connect to or reset the development PostgreSQL database.
-- **AI assistant:** FastAPI retrieves evidence from the selected PostgreSQL dataset and sends bounded, untrusted log context to the configured Groq or OpenRouter model. Responses include source references and report whether the provider confirmed normal completion.
-- **Analytics:** FastAPI computes dataset-scoped severity counts, error/warning totals, normalized recurring-error patterns, and a timeline directly from stored entries. Analytics are deterministic and do not call an LLM.
+```mermaid
+flowchart LR
+    Browser[Browser]
+    React[React + TypeScript]
+    Nginx[Nginx frontend container]
+    FastAPI[FastAPI backend]
+    PostgreSQL[(PostgreSQL)]
+    Provider[Groq or OpenRouter\noptional hosted AI]
 
-The API creates missing tables at startup with SQLAlchemy `create_all`. A schema migration tool is not part of this phase.
+    Browser --> React
+    React -->|Local development: HTTP| FastAPI
+    React -->|Compose: same-origin /api and /health| Nginx
+    Nginx -->|proxy, no API path rewrite| FastAPI
+    FastAPI --> PostgreSQL
+    FastAPI -.->|AI questions only| Provider
+```
 
-## Requirements
+In Docker Compose, Nginx serves the built React application and proxies `/api/` and `/health` to FastAPI. FastAPI connects to PostgreSQL using the Compose service name `db` on port `5432`. In local development, Vite runs on port `5173` and the browser calls FastAPI on port `8000`.
 
-- Python 3.10 or newer
-- Node.js and npm
-- Git Bash for Windows
-- Docker Desktop with Docker Compose
+## Technology
 
-## Environment configuration
+- Frontend: React 18, TypeScript, Vite 6
+- Backend: Python 3.10+, FastAPI, Pydantic, SQLAlchemy 2, Psycopg 3
+- Database: PostgreSQL 16
+- Optional hosted LLM providers: Groq and OpenRouter
+- Container workflow: Docker Compose, Nginx
+- Checks: pytest, frontend Node test runner, TypeScript, Vite production build, GitHub Actions
 
-The repository has a root `.env.example`. On a fresh checkout, create `.env` only if it does not already exist:
+## Configuration and privacy
+
+Use the repository-root `.env.example` as a template. On a fresh checkout, create `.env` only if it does not already exist:
 
 ```bash
 if [ ! -f .env ]; then cp .env.example .env; fi
 ```
 
-Set a private local value for `POSTGRES_PASSWORD` in `.env`. Do not commit `.env` or share its contents. PostgreSQL uses `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`; local backend development defaults to host `127.0.0.1` and `POSTGRES_HOST_PORT` 5433. Compose overrides the backend host/port to `db:5432`. SQLAlchemy builds the URL from separate values, so password characters do not need manual URL escaping. `LOG_LENS_MAX_UPLOAD_BYTES` defaults to 10 MiB. `LOG_LENS_CORS_ORIGINS` and `VITE_API_BASE_URL` configure browser communication for local development.
+Set a private `POSTGRES_PASSWORD` before starting PostgreSQL. Compose obtains `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from the root `.env`. For local backend development, PostgreSQL defaults to `127.0.0.1:5433`; inside Compose the backend uses `db:5432`. The host port can be changed with `POSTGRES_HOST_PORT`. The application builds its SQLAlchemy URL from separate settings, so password URL-escaping is not needed.
 
-If you already have a local `.env` file, preserve its existing values and add only settings that are missing. Provider settings are:
+Other settings include `LOG_LENS_MAX_UPLOAD_BYTES` (defaults to 10 MiB), `LOG_LENS_CORS_ORIGINS`, and `VITE_API_BASE_URL` for local browser development. `VITE_API_BASE_URL` is public frontend configuration, not a place for secrets. Compose uses the same-origin Nginx proxy and does not require it.
 
-```dotenv
-POSTGRES_DB=loglens
-POSTGRES_USER=loglens
-POSTGRES_PASSWORD=<choose-a-private-local-password>
-POSTGRES_HOST=127.0.0.1
-POSTGRES_HOST_PORT=5433
-LOG_LENS_MAX_UPLOAD_BYTES=10485760
-GROQ_API_KEY=<your-private-groq-api-key>
-GROQ_MODEL=openai/gpt-oss-20b
-LLM_PROVIDER=groq
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=
-```
+For AI questions, set `LLM_PROVIDER=groq` with `GROQ_API_KEY` and `GROQ_MODEL`, or set `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. The Groq model default is `openai/gpt-oss-20b`; OpenRouter requires a model ID. Provider settings are passed to the backend at runtime and are not built into the frontend image. AI credentials are optional for uploads, browsing, and analytics. Never commit `.env` or expose its values. Sanitize uploaded logs before using a hosted provider because log content may contain secrets or personal data.
 
-The placeholder in the example above is explanatory; replace it with a local password. `.env.example` uses a placeholder only. Vite variables are public browser settings and must not contain secrets.
+If `.env` already exists, preserve its current database credentials. Changing Compose environment values does not change credentials inside an initialized PostgreSQL volume.
 
-### AI provider setup
+## Local development with Git Bash
 
-For Groq, create an API key in the [Groq console](https://console.groq.com/keys), then set `LLM_PROVIDER=groq`, `GROQ_API_KEY`, and `GROQ_MODEL` in the ignored root `.env`. The existing model default is `openai/gpt-oss-20b`; choose a model available to your Groq account.
-
-For OpenRouter, create an API key in [OpenRouter settings](https://openrouter.ai/settings/keys), then set `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL`. Select a model ID from [OpenRouter's model list](https://openrouter.ai/models); LogLens intentionally does not choose a default OpenRouter model. Some models have zero listed input/output pricing, but availability, free-tier terms, context limits and rate limits can change. Check the model listing and account terms before use.
-
-The backend loads the root `.env` at startup. Provider keys remain backend-only and are never returned to the browser. In Compose, provider settings are passed to the backend container at runtime; they are not copied into either image, and the frontend build context does not include the root `.env`. To switch providers, stop the backend, change `LLM_PROVIDER` and the corresponding key/model settings in `.env`, then restart it. Do not remove the other provider's values if you want to switch back easily. Never commit `.env`. Sanitize sensitive log contents before sending relevant entries to a hosted provider.
-
-## Setup in Git Bash
-
-Open Git Bash at the repository root. After configuring `.env`, create the Python environment and install dependencies:
+Run these setup commands from the repository root. Docker Desktop with Compose is needed for PostgreSQL.
 
 ```bash
 python -m venv backend/.venv
 source backend/.venv/Scripts/activate
 python -m pip install -r backend/requirements-dev.txt
 cd frontend
-npm install
+npm ci
 cd ..
-```
-
-## Start and stop PostgreSQL
-
-From the repository root, start the database and wait for its health check:
-
-```bash
 docker compose up -d db
 docker compose ps
 ```
 
-The database port is bound to `127.0.0.1:5433` by default, reducing conflicts with a local PostgreSQL server on port 5432. The named `loglens_postgres_data` volume persists records across container stops.
-
-Stop the container without deleting database files:
-
-```bash
-docker compose stop db
-```
-
-To remove the stopped container and Compose network while retaining the named data volume, use `docker compose down`. Do not use `docker compose down -v` unless you intentionally want to delete the database volume.
-
-## Run the full application with Docker Compose
-
-This mode is separate from the local Python/Vite workflow above. Ensure the root `.env` has database settings that match the existing PostgreSQL volume. **Keep the same `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` that initialized that volume**; changing those environment values does not change the credentials stored in an already initialized database. Set the selected LLM provider key in `.env` only if you want AI chat enabled; uploads and analytics do not require it.
-
-From the repository root, build and start all three services:
-
-```bash
-docker compose up --build -d
-docker compose ps
-```
-
-Wait until `db` is healthy, then `backend` and `frontend` should report healthy. Open the frontend at `http://127.0.0.1:5173`. The backend is available at `http://127.0.0.1:8000`, with API documentation at `http://127.0.0.1:8000/docs`; its health endpoint is `http://127.0.0.1:8000/health`. The frontend also proxies `/health` and `/api/` to the backend on the internal Compose network.
-
-View service logs without printing environment values:
-
-```bash
-docker compose logs -f backend frontend
-docker compose logs -f db
-```
-
-Rebuild application images after code or dependency changes:
-
-```bash
-docker compose build backend frontend
-docker compose up -d backend frontend
-```
-
-Stop services while retaining containers and the database volume:
-
-```bash
-docker compose stop
-```
-
-`docker compose down` also removes the containers and network but preserves the named `loglens_postgres_data` volume. Neither command deletes database records. **Never use `docker compose down -v` or volume-pruning commands as routine troubleshooting.** The existing PostgreSQL service name, host port mapping, volume name, and health check are retained.
-
-## Start the backend
-
-In a Git Bash terminal from the repository root, with the virtual environment active:
+Start the backend in one Git Bash terminal from the repository root:
 
 ```bash
 source backend/.venv/Scripts/activate
 python -m uvicorn app.main:app --reload --app-dir backend
 ```
 
-The backend listens on `http://127.0.0.1:8000`. `GET /health` returns `{"status":"healthy"}` after the database is available and the application has initialized its tables. Interactive API documentation is at `http://127.0.0.1:8000/docs`.
-
-## Start the frontend
-
-In a second Git Bash terminal:
+Start Vite in a second terminal:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. The existing backend connection indicator remains. Select a `.log` or `.txt` file, review its name and size, then choose **Upload and inspect**. After upload, the page shows parsing counts, entries, severity filtering, case-insensitive message search, and pagination. The sample file is `backend/sample_logs/sample.log`.
+Open the frontend at `http://127.0.0.1:5173`. The connection status near the top should report **Backend connected**. The frontend calls `GET /health`; verify it directly with:
 
-### API endpoints
+```bash
+curl http://127.0.0.1:8000/health
+```
 
-| Method and path | Request | Response |
-| --- | --- | --- |
-| `GET /health` | None | `{"status":"healthy"}` |
-| `POST /api/uploads` | Multipart form field named `file` | Upload ID, filename, byte size, and parsed/unparsed counts; HTTP 201 |
-| `GET /api/uploads?limit=20` | Optional recent-list limit, 1–100 | Recent upload records and their counts |
-| `GET /api/uploads/{upload_id}/entries` | Optional `page` (default 1), `page_size` (default 50, max 100), `severity`, `q`, and exact `line_number` | `items`, `page`, `page_size`, `total`, and `total_pages` |
-| `GET /api/uploads/{upload_id}/analytics` | Dataset upload ID | Severity counts, error/warning totals, up to 10 recurring error patterns, and timestamped entry activity buckets |
-| `POST /api/uploads/{upload_id}/ai/chat` | JSON body: `{"question":"Why did the database connection fail?"}` | Grounded `answer`, bounded `evidence` references, and `completion_status` (`complete` or `unknown`) |
+The response is `{"status":"healthy"}`. If the frontend cannot connect, ensure both servers are running and `VITE_API_BASE_URL` is unset or points to `http://127.0.0.1:8000`. The interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
-After uploading a dataset, the page shows a deterministic overview of severity counts, errors, warnings, recurring error patterns, and entry activity over time. Pattern grouping is case-insensitive, collapses whitespace, and replaces timestamps, UUIDs, and valid IPv4 addresses; severity stays part of the pattern key, and numeric values such as HTTP status codes are preserved. The dashboard lists up to 10 patterns, ordered by occurrence count, with representative source line numbers.
+To stop the local PostgreSQL service without removing its data, use `docker compose stop db`.
 
-Use the **Ask about these logs** panel for AI questions. Follow-up questions include at most the four most recent question/answer turns as context. The backend includes the complete dataset when it fits within the configured entry and evidence-context limits. Larger datasets use up to 100 keyword candidates and at most 12 evidence entries, each message capped at 1,200 characters. The prompt identifies whether evidence is complete or a subset. Log text is treated as untrusted evidence; the assistant is instructed to ignore embedded instructions, distinguish facts from hypotheses, and cite only supplied lines. These safeguards cannot guarantee that an LLM never makes a mistake; verify important conclusions against the displayed source entries.
+## Run with Docker Compose
 
-Upload a sample with Git Bash `curl`:
+This is a separate run mode; do not start the local backend or Vite server at the same time because they use the same host ports. Confirm the root `.env` matches the credentials that initialized the existing database volume. An AI provider key is needed only for AI questions.
+
+Validate the Compose configuration and build/start the three services:
+
+```bash
+docker compose config -q
+docker compose build
+docker compose up --build -d
+docker compose ps
+```
+
+Open the application at `http://127.0.0.1:5173`. Confirm the frontend is healthy and check its backend connection status. In Compose, the frontend calls same-origin `/health` and `/api/`; Nginx forwards those requests to FastAPI. Direct backend health and API docs are available at `http://127.0.0.1:8000/health` and `http://127.0.0.1:8000/docs`.
+
+Useful service commands:
+
+```bash
+docker compose logs -f frontend backend
+docker compose logs -f db
+docker compose stop
+docker compose down
+```
+
+The named `loglens_postgres_data` volume stores PostgreSQL data and survives `stop` and `down`. `down` removes containers and the network, but not that named volume. Do not use `docker compose down -v` or volume-pruning commands for routine troubleshooting; those can delete database data. The Compose database service, localhost-only host port mapping (`127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432`), volume name, and health check are part of the existing configuration.
+
+## API overview
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /health` | API process health response |
+| `POST /api/uploads` | Upload and parse a multipart `.log` or `.txt` file |
+| `GET /api/uploads?limit=20` | List recent uploads (limit 1–100) |
+| `GET /api/uploads/{upload_id}/entries` | Page and filter entries by severity, text, or exact line number |
+| `GET /api/uploads/{upload_id}/analytics` | Dataset-scoped counts, error patterns, and activity buckets |
+| `POST /api/uploads/{upload_id}/ai/chat` | Ask a dataset-scoped question and receive bounded evidence references |
+
+The sample log is `backend/sample_logs/sample.log`. Upload it to a locally running backend with Git Bash:
 
 ```bash
 curl -F "file=@backend/sample_logs/sample.log" http://127.0.0.1:8000/api/uploads
 ```
 
-Use the returned upload `id` to inspect a filtered page:
+Use the returned upload `id` to request a filtered page:
 
 ```bash
 curl -G "http://127.0.0.1:8000/api/uploads/UPLOAD_ID/entries" \
@@ -180,45 +151,40 @@ curl -G "http://127.0.0.1:8000/api/uploads/UPLOAD_ID/entries" \
   --data-urlencode "page_size=25"
 ```
 
-`WARNING` is normalized to `WARN` for both stored records and filtering. Unsupported severity values and invalid pagination receive HTTP 422; a missing upload ID receives 404. Unsupported extensions, empty files, and invalid UTF-8 receive 400; files over the configured size receive 413. Database errors return a generic 503 response without SQL details.
+The parser skips blank lines but preserves each non-empty line's physical line number. Unrecognized lines remain available as raw, unparsed entries. `WARNING` is normalized to `WARN`. Invalid query parameters return HTTP 422, a missing upload ID returns 404, invalid or unsupported uploads return 400, oversized uploads return 413, and database failures return a generic 503 without SQL details.
 
-Uploads accept UTF-8 text files with `.log` or `.txt` suffixes, up to the configured size. Empty files and invalid UTF-8 are rejected. Blank lines are skipped; each non-empty line keeps its physical source line number. Records outside the supported format remain available as raw, unparsed entries. Uploaded contents are never executed. Sanitize logs before uploading because they may contain passwords, tokens, personal data, or other secrets.
+## Analytics and AI behavior
 
-## Tests and frontend build
+Analytics are computed in backend code from the selected dataset. Error-like entries (`ERROR`, `FATAL`, `CRITICAL`) are grouped by severity and simple normalization: case and whitespace differences are collapsed, and timestamps, UUIDs, and valid IPv4 addresses are replaced. Numeric values such as status codes remain distinct. The page shows up to 10 top patterns with occurrence counts and representative source lines; the API includes the unique and recurring pattern counts. Timestamped entries feed activity buckets; unparsed entries are counted separately.
 
-With the Python environment active, from the repository root:
+For AI questions, follow-up requests include at most four prior turns. If the dataset fits the evidence entry and context-size limits, all entries are provided to the model. Larger datasets use bounded keyword retrieval (up to 100 candidates and 12 evidence entries, with each message capped at 1,200 characters). The prompt distinguishes complete-dataset evidence from a retrieved subset. Responses include evidence references; when the model does not provide completion metadata, the UI marks completion status as unknown. Treat answers as assistance, check citations against the displayed source entries, and do not treat a suggested explanation as a proven root cause.
+
+Groq and OpenRouter availability, model limits, and account quotas can change. See the [Groq API reference](https://console.groq.com/docs/api-reference) and [OpenRouter model list](https://openrouter.ai/models) for current provider information.
+
+## Tests and continuous integration
+
+From the repository root, with the backend virtual environment active:
 
 ```bash
-python -m pytest backend/tests
+python -m pytest backend/tests -q
 ```
 
-Build the frontend from `frontend`:
+Run the frontend checks from `frontend`:
 
 ```bash
+npm test
 npm run build
 ```
 
-Tests use their own in-memory SQLite database. They exercise persistence and API behavior without modifying the Compose PostgreSQL volume.
+Backend tests use an isolated in-memory SQLite database and do not connect to or reset the Compose PostgreSQL volume. AI provider calls are mocked, so tests require no real API key and consume no provider quota. The frontend build runs TypeScript checking before the Vite production build.
 
-AI provider requests are mocked in tests. The suite does not need real API keys and does not make live provider requests. A confirmed token-limit finish reason produces a clear incomplete-response error. If a provider omits its finish reason, the answer is returned with a “completion status unknown” notice instead of being labeled complete. Provider availability, model-specific output limits, account quotas and rate limits can affect live responses. Groq's and OpenRouter's limits and model availability vary by account and model; consult [Groq's API reference](https://console.groq.com/docs/api-reference) and [OpenRouter's model list](https://openrouter.ai/models) for current details.
-
-## Continuous integration
-
-The workflow in `.github/workflows/ci.yml` runs on pushes to `main` and pull requests targeting `main`. Its independent jobs install the locked backend/frontend dependencies, run the complete backend suite, and run the frontend TypeScript check and production build. The backend uses the existing isolated SQLite test setup; CI does not read `.env`, connect to PostgreSQL, or call Groq/OpenRouter. Dependency caches use the existing requirements and npm lock files. This repository is not deployed to a cloud provider by this workflow.
-
-## Troubleshooting
-
-- If Compose reports a port is already allocated, stop the local process using port 5173 or 8000 before starting the full Compose stack. The existing PostgreSQL host port remains configurable through `POSTGRES_HOST_PORT` and defaults to 5433.
-- If `backend` does not become healthy, check `docker compose ps` and `docker compose logs backend db`. Confirm the `.env` credentials match those used when the existing persistent database was initialized. Do not reset the database or remove its volume to resolve an authentication error.
-- If the frontend loads but API calls fail, inspect `docker compose logs frontend backend`; in Compose the frontend sends `/api/` and `/health` to Nginx, which proxies them to the backend service.
-- For local development, confirm the backend is at `127.0.0.1:8000` and `VITE_API_BASE_URL` is unset or points to that address. Docker Compose does not require `VITE_API_BASE_URL` because it uses the same-origin Nginx proxy.
-- AI requests require a valid selected provider key. Missing provider credentials do not prevent PostgreSQL-backed upload, browsing, or analytics.
+`.github/workflows/ci.yml` runs separate backend-test and frontend-build jobs on pushes to `main` and pull requests targeting `main`. The backend job installs `backend/requirements-dev.txt` and runs the backend suite; the frontend job uses `npm ci` with `frontend/package-lock.json`, then runs `npm run build`. The jobs use no `.env`, PostgreSQL service, or live provider credentials. CI is not a cloud deployment workflow. A successful local run does not confirm that GitHub Actions has completed; check the repository Actions page after a push or pull request.
 
 ## Current limitations
 
-- Only the documented timestamp + severity + message format is parsed. Other formats and multiline stack-trace grouping are not yet supported.
-- Data is stored in PostgreSQL; uploaded file bytes are not retained separately. There is no delete/export interface yet.
+- Only the documented timestamp + severity + message format is parsed. Other formats and multiline stack-trace grouping are not supported.
+- The original uploaded file bytes are not retained. There is no delete or export interface.
 - SQLAlchemy `create_all` creates missing tables but does not migrate existing schemas.
-- AI is currently keyword-retrieval question answering only. There is no dedicated whole-dataset summary endpoint, semantic retrieval, saved chat history, authentication, deployment, or CI/CD yet.
-- Analytics group error-like entries (`ERROR`, `FATAL`, and `CRITICAL`) using simple normalization, not semantic similarity. Only the top 10 patterns are shown; the API reports the full unique and recurring pattern counts. Activity buckets use records with timestamps; unparsed lines are counted separately and do not contribute to timestamped activity.
-- The selected hosted provider, its model availability and account rate limits affect assistant responses. Without valid credentials and model configuration for the selected provider, ordinary log upload and exploration continue to work, but AI requests return a configuration error.
+- AI is keyword-retrieval question answering. There is no dedicated whole-dataset summary endpoint, semantic search, embeddings, saved chat history, or authentication. Hosted model responses can still be wrong or incomplete.
+- Error-pattern grouping is heuristic, not semantic similarity. Only the top 10 patterns are displayed. Activity buckets require timestamps.
+- This phase provides local Docker Compose and GitHub Actions checks, but no AWS deployment, CloudWatch monitoring, or automated release pipeline.

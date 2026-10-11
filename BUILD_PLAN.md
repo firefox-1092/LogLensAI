@@ -51,11 +51,11 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - [x] Verified locally: backend suite 59 passed; `npm ci`; frontend tests 5 passed; TypeScript/production build passed; `docker compose config -q` passed; both images built; all Compose services became healthy. Frontend `/health`, proxied upload listing, and a read-only dataset analytics request succeeded. Database remained on `loglensai_loglens_postgres_data` with 11 uploads and 64 log entries before and after startup. GitHub Actions itself will run after a push or pull request.
 
 ## Phase 5 — Demo readiness
-- Add optional saved reports if the essential workflow is stable.
-- Create a synthetic sample log file with varied severities and repeated errors.
-- Run backend tests and frontend TypeScript/build checks.
-- Complete README, endpoint documentation, known limitations, screenshots, and an architecture diagram.
-- Walk through the entire demo from a clean setup.
+- [x] A synthetic sample log with varied severities and repeated errors is available at `backend/sample_logs/sample.log`.
+- [x] README setup, API overview, known limitations, and the current architecture diagram are documented.
+- [ ] Add optional saved reports only if time allows; they are not part of the current implementation.
+- [ ] Capture screenshots if they are useful for the final demo or portfolio.
+- [ ] Walk through the entire demo from a clean setup and record the results.
 
 ## Phase 6 — Post-submission portfolio expansion
 - Improve normalized-message grouping and evaluate embedding-based semantic grouping.
