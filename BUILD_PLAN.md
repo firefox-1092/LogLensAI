@@ -35,7 +35,7 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - [x] Add isolated backend analytics and normalization regression tests.
 - [x] Complete backend suite: 59 tests passed; frontend TypeScript/production build passed; `git diff --check` passed on 2026-10-12.
 
-## Phase 4 — Grounded AI features
+## Phase 4 — Grounded AI, Docker, and CI/CD (implemented)
 - Define a provider-neutral LLM service interface and backend-only provider configuration.
 - Implement retrieval of a bounded set of relevant records.
 - Add summary and question-answer endpoints.
@@ -45,6 +45,10 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - Mock LLM calls in tests and add graceful handling of unavailable/misconfigured providers.
 - Never make the core application unusable if the external LLM is unavailable; display a clear error and keep non-AI features working.
 - [x] Implemented provider-neutral dataset question answering with Groq as the default, configurable OpenRouter support, bounded evidence retrieval, source references, safe provider errors, mocked provider tests, and a dataset-scoped frontend assistant. The UI reports when completion metadata is unavailable. No summary endpoint or semantic retrieval is included.
+- [x] Added separate backend and frontend Docker images, a same-origin Nginx API proxy, and Compose services while preserving the existing PostgreSQL port mapping and named data volume.
+- [x] Added independent GitHub Actions backend-test and frontend-build jobs with dependency caching and no provider credentials.
+- [x] Documented local and Docker workflows, persistence, health checks, logs, rebuilds, CI, and troubleshooting.
+- [x] Verified locally: backend suite 59 passed; `npm ci`; frontend tests 5 passed; TypeScript/production build passed; `docker compose config -q` passed; both images built; all Compose services became healthy. Frontend `/health`, proxied upload listing, and a read-only dataset analytics request succeeded. Database remained on `loglensai_loglens_postgres_data` with 11 uploads and 64 log entries before and after startup. GitHub Actions itself will run after a push or pull request.
 
 ## Phase 5 — Demo readiness
 - Add optional saved reports if the essential workflow is stable.
@@ -56,8 +60,6 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 ## Phase 6 — Post-submission portfolio expansion
 - Improve normalized-message grouping and evaluate embedding-based semantic grouping.
 - Add authentication/authorization if warranted.
-- Dockerize the full application and document local orchestration.
-- Add GitHub Actions for tests and build checks.
 - Deploy to AWS EC2 behind Nginx/HTTPS when ready.
 - Add CloudWatch logs/metrics/alarms and deployment documentation.
 - Consider S3, more log formats, or automated ingestion only if justified.

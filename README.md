@@ -9,6 +9,7 @@ LogLens turns raw application logs into structured, searchable evidence. It supp
 - **Frontend:** React, TypeScript, and Vite. The browser sends HTTP requests to FastAPI.
 - **API:** FastAPI with Pydantic response schemas and SQLAlchemy ORM models.
 - **Database:** PostgreSQL 16 in Docker Compose for local development. A named volume keeps data when the container stops.
+- **Containerized application:** Docker Compose can also run the FastAPI backend and a static Nginx frontend. The frontend proxies API requests over the Compose network; the backend reaches PostgreSQL using the `db` service name.
 - **Parser:** a small Python module extracts timestamps, supported severity levels, and messages. It retains unsupported non-empty lines as unparsed records.
 - **Tests:** backend tests use an isolated in-memory SQLite database. They do not connect to or reset the development PostgreSQL database.
 - **AI assistant:** FastAPI retrieves evidence from the selected PostgreSQL dataset and sends bounded, untrusted log context to the configured Groq or OpenRouter model. Responses include source references and report whether the provider confirmed normal completion.
@@ -31,7 +32,7 @@ The repository has a root `.env.example`. On a fresh checkout, create `.env` onl
 if [ ! -f .env ]; then cp .env.example .env; fi
 ```
 
-Set a private local value for `POSTGRES_PASSWORD` in `.env`. Do not commit `.env` or share its contents. PostgreSQL uses `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`; the backend connects to `127.0.0.1` using `POSTGRES_HOST_PORT` (default `5433`). `LOG_LENS_MAX_UPLOAD_BYTES` defaults to 10 MiB. `LOG_LENS_CORS_ORIGINS` and `VITE_API_BASE_URL` configure browser communication.
+Set a private local value for `POSTGRES_PASSWORD` in `.env`. Do not commit `.env` or share its contents. PostgreSQL uses `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`; local backend development defaults to host `127.0.0.1` and `POSTGRES_HOST_PORT` 5433. Compose overrides the backend host/port to `db:5432`. SQLAlchemy builds the URL from separate values, so password characters do not need manual URL escaping. `LOG_LENS_MAX_UPLOAD_BYTES` defaults to 10 MiB. `LOG_LENS_CORS_ORIGINS` and `VITE_API_BASE_URL` configure browser communication for local development.
 
 If you already have a local `.env` file, preserve its existing values and add only settings that are missing. Provider settings are:
 
@@ -39,6 +40,7 @@ If you already have a local `.env` file, preserve its existing values and add on
 POSTGRES_DB=loglens
 POSTGRES_USER=loglens
 POSTGRES_PASSWORD=<choose-a-private-local-password>
+POSTGRES_HOST=127.0.0.1
 POSTGRES_HOST_PORT=5433
 LOG_LENS_MAX_UPLOAD_BYTES=10485760
 GROQ_API_KEY=<your-private-groq-api-key>
@@ -56,7 +58,7 @@ For Groq, create an API key in the [Groq console](https://console.groq.com/keys)
 
 For OpenRouter, create an API key in [OpenRouter settings](https://openrouter.ai/settings/keys), then set `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL`. Select a model ID from [OpenRouter's model list](https://openrouter.ai/models); LogLens intentionally does not choose a default OpenRouter model. Some models have zero listed input/output pricing, but availability, free-tier terms, context limits and rate limits can change. Check the model listing and account terms before use.
 
-The backend loads the root `.env` at startup. Provider keys remain backend-only and are never returned to the browser. To switch providers, stop the backend, change `LLM_PROVIDER` and the corresponding key/model settings in `.env`, then restart it. Do not remove the other provider's values if you want to switch back easily. Never commit `.env`. Sanitize sensitive log contents before sending relevant entries to a hosted provider.
+The backend loads the root `.env` at startup. Provider keys remain backend-only and are never returned to the browser. In Compose, provider settings are passed to the backend container at runtime; they are not copied into either image, and the frontend build context does not include the root `.env`. To switch providers, stop the backend, change `LLM_PROVIDER` and the corresponding key/model settings in `.env`, then restart it. Do not remove the other provider's values if you want to switch back easily. Never commit `.env`. Sanitize sensitive log contents before sending relevant entries to a hosted provider.
 
 ## Setup in Git Bash
 
@@ -89,6 +91,41 @@ docker compose stop db
 ```
 
 To remove the stopped container and Compose network while retaining the named data volume, use `docker compose down`. Do not use `docker compose down -v` unless you intentionally want to delete the database volume.
+
+## Run the full application with Docker Compose
+
+This mode is separate from the local Python/Vite workflow above. Ensure the root `.env` has database settings that match the existing PostgreSQL volume. **Keep the same `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` that initialized that volume**; changing those environment values does not change the credentials stored in an already initialized database. Set the selected LLM provider key in `.env` only if you want AI chat enabled; uploads and analytics do not require it.
+
+From the repository root, build and start all three services:
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+Wait until `db` is healthy, then `backend` and `frontend` should report healthy. Open the frontend at `http://127.0.0.1:5173`. The backend is available at `http://127.0.0.1:8000`, with API documentation at `http://127.0.0.1:8000/docs`; its health endpoint is `http://127.0.0.1:8000/health`. The frontend also proxies `/health` and `/api/` to the backend on the internal Compose network.
+
+View service logs without printing environment values:
+
+```bash
+docker compose logs -f backend frontend
+docker compose logs -f db
+```
+
+Rebuild application images after code or dependency changes:
+
+```bash
+docker compose build backend frontend
+docker compose up -d backend frontend
+```
+
+Stop services while retaining containers and the database volume:
+
+```bash
+docker compose stop
+```
+
+`docker compose down` also removes the containers and network but preserves the named `loglens_postgres_data` volume. Neither command deletes database records. **Never use `docker compose down -v` or volume-pruning commands as routine troubleshooting.** The existing PostgreSQL service name, host port mapping, volume name, and health check are retained.
 
 ## Start the backend
 
@@ -164,6 +201,18 @@ npm run build
 Tests use their own in-memory SQLite database. They exercise persistence and API behavior without modifying the Compose PostgreSQL volume.
 
 AI provider requests are mocked in tests. The suite does not need real API keys and does not make live provider requests. A confirmed token-limit finish reason produces a clear incomplete-response error. If a provider omits its finish reason, the answer is returned with a “completion status unknown” notice instead of being labeled complete. Provider availability, model-specific output limits, account quotas and rate limits can affect live responses. Groq's and OpenRouter's limits and model availability vary by account and model; consult [Groq's API reference](https://console.groq.com/docs/api-reference) and [OpenRouter's model list](https://openrouter.ai/models) for current details.
+
+## Continuous integration
+
+The workflow in `.github/workflows/ci.yml` runs on pushes to `main` and pull requests targeting `main`. Its independent jobs install the locked backend/frontend dependencies, run the complete backend suite, and run the frontend TypeScript check and production build. The backend uses the existing isolated SQLite test setup; CI does not read `.env`, connect to PostgreSQL, or call Groq/OpenRouter. Dependency caches use the existing requirements and npm lock files. This repository is not deployed to a cloud provider by this workflow.
+
+## Troubleshooting
+
+- If Compose reports a port is already allocated, stop the local process using port 5173 or 8000 before starting the full Compose stack. The existing PostgreSQL host port remains configurable through `POSTGRES_HOST_PORT` and defaults to 5433.
+- If `backend` does not become healthy, check `docker compose ps` and `docker compose logs backend db`. Confirm the `.env` credentials match those used when the existing persistent database was initialized. Do not reset the database or remove its volume to resolve an authentication error.
+- If the frontend loads but API calls fail, inspect `docker compose logs frontend backend`; in Compose the frontend sends `/api/` and `/health` to Nginx, which proxies them to the backend service.
+- For local development, confirm the backend is at `127.0.0.1:8000` and `VITE_API_BASE_URL` is unset or points to that address. Docker Compose does not require `VITE_API_BASE_URL` because it uses the same-origin Nginx proxy.
+- AI requests require a valid selected provider key. Missing provider credentials do not prevent PostgreSQL-backed upload, browsing, or analytics.
 
 ## Current limitations
 
