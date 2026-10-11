@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
-import { checkHealth, fetchEntries, uploadLogFile } from './api';
-import type { LogEntry, PaginatedEntries, UploadSummary } from './api';
+import type { FormEvent, ReactNode } from 'react';
+import { askDatasetQuestion, checkHealth, fetchEntries, uploadLogFile } from './api';
+import type { AIChatResponse, LogEntry, PaginatedEntries, UploadSummary } from './api';
+import { parseAssistantMarkdown } from './markdown.mjs';
+import type { InlineToken } from './markdown.mjs';
 
 type ConnectionState = 'loading' | 'connected' | 'error';
 const PAGE_SIZE = 25;
@@ -15,6 +17,30 @@ function formatBytes(bytes: number): string {
 function formatTimestamp(timestamp: string | null): string {
   if (!timestamp) return '—';
   return timestamp.replace('T', ' ').slice(0, 19);
+}
+
+function renderInlineMarkdown(tokens: InlineToken[]): ReactNode[] {
+  return tokens.map((token, index) => {
+    if (token.type === 'strong') return <strong key={index}>{token.value}</strong>;
+    if (token.type === 'emphasis') return <em key={index}>{token.value}</em>;
+    if (token.type === 'code') return <code key={index}>{token.value}</code>;
+    return token.value;
+  });
+}
+
+function renderAssistantAnswer(answer: string): ReactNode {
+  const blocks = parseAssistantMarkdown(answer).map((block, index) => {
+    if (block.type === 'heading') {
+      const heading = renderInlineMarkdown(block.tokens);
+      if (block.level === 1) return <h1 key={index}>{heading}</h1>;
+      if (block.level === 2) return <h2 key={index}>{heading}</h2>;
+      return <h3 key={index}>{heading}</h3>;
+    }
+    if (block.type === 'paragraph') return <p key={index}>{renderInlineMarkdown(block.tokens)}</p>;
+    const items = block.items.map((tokens, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(tokens)}</li>);
+    return block.type === 'ordered-list' ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>;
+  });
+  return <div className="assistant-answer">{blocks}</div>;
 }
 
 export default function App() {
@@ -31,6 +57,10 @@ export default function App() {
   const [severity, setSeverity] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
+  const [assistantQuestion, setAssistantQuestion] = useState('');
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [assistantError, setAssistantError] = useState('');
+  const [assistantTurns, setAssistantTurns] = useState<Array<{ question: string; result: AIChatResponse }>>([]);
 
   const checkBackend = useCallback(async (signal: AbortSignal) => {
     setConnection('loading');
@@ -79,6 +109,8 @@ export default function App() {
       setSearchInput('');
       setSearchTerm('');
       setPage(1);
+      setAssistantTurns([]);
+      setAssistantError('');
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'The file could not be uploaded.');
     } finally {
@@ -90,6 +122,27 @@ export default function App() {
     event.preventDefault();
     setPage(1);
     setSearchTerm(searchInput.trim());
+  }
+
+  async function handleAssistantQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!dataset || !assistantQuestion.trim()) return;
+    const question = assistantQuestion.trim();
+    setAssistantLoading(true);
+    setAssistantError('');
+    try {
+      const history = assistantTurns.slice(-4).map((turn) => ({
+        question: turn.question,
+        answer: turn.result.answer,
+      }));
+      const result = await askDatasetQuestion(dataset.id, question, history);
+      setAssistantTurns((turns) => [...turns, { question, result }]);
+      setAssistantQuestion('');
+    } catch (error) {
+      setAssistantError(error instanceof Error ? error.message : 'The AI assistant could not answer right now.');
+    } finally {
+      setAssistantLoading(false);
+    }
   }
 
   return (
@@ -164,6 +217,36 @@ export default function App() {
               <div className="metric success"><strong>{dataset.parsed_entries}</strong><small>PARSED</small></div>
               <div className="metric muted"><strong>{dataset.unparsed_entries}</strong><small>UNPARSED</small></div>
             </div>
+
+            <section className="assistant-panel" aria-label="AI log assistant">
+              <div className="assistant-heading">
+                <div><div className="eyebrow"><span className="eyebrow-line" /> AI ASSISTANT</div><h2>Ask about these logs</h2></div>
+                <span className="assistant-note">Answers cite retrieved log lines</span>
+              </div>
+              {assistantTurns.map((turn, index) => (
+                <article className="assistant-turn" key={`${index}-${turn.question}`}>
+                  <p className="assistant-question">{turn.question}</p>
+                  {renderAssistantAnswer(turn.result.answer)}
+                  {turn.result.completion_status === 'unknown' && <p className="assistant-status">The provider did not report whether generation ended normally. Review the answer against the supporting entries.</p>}
+                  {turn.result.evidence.length > 0 && <div className="evidence-list">
+                    <strong>{turn.result.cited_evidence.length > 0 ? 'Supporting entries' : 'Available context'}</strong>
+                    {(turn.result.cited_evidence.length > 0 ? turn.result.cited_evidence : turn.result.evidence).map((item) => <div className="evidence-item" key={item.id}>
+                      <span>Line {item.line_number}{item.severity ? ` · ${item.severity}` : ''}{!item.parsed ? ' · UNPARSED' : ''}</span><p>{!item.parsed ? item.raw_line ?? item.message : item.message}</p>
+                      {!item.parsed && <small>Original text retained; timestamp, severity, and structured meaning could not be reliably extracted.</small>}
+                    </div>)}
+                  </div>}
+                </article>
+              ))}
+              <form className="assistant-form" onSubmit={handleAssistantQuestion}>
+                <label className="sr-only" htmlFor="assistant-question">Ask a question about this dataset</label>
+                <input id="assistant-question" maxLength={1000} value={assistantQuestion} onChange={(event) => setAssistantQuestion(event.target.value)} placeholder="Ask about errors, events, or what to investigate…" />
+                <button type="submit" disabled={!assistantQuestion.trim() || assistantLoading}>
+                  {assistantLoading ? 'Thinking…' : 'Ask LogLens'}
+                </button>
+              </form>
+              {assistantLoading && <p className="assistant-status" role="status"><span className="spinner" /> Searching relevant entries and asking the configured model…</p>}
+              {assistantError && <p className="form-error" role="alert">{assistantError}</p>}
+            </section>
 
             <div className="entries-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> SOURCE RECORDS</div><h2>Log entries</h2></div><span className="entry-count">{entries?.total ?? '—'} matching records</span></div>
             <div className="filters">

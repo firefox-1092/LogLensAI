@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
+from .ai import router as ai_router
 from .database import create_database_engine, database_url_from_environment
 from .models import Base
 from .uploads import router as uploads_router
@@ -66,6 +67,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         )
 
     application.include_router(uploads_router)
+    application.include_router(ai_router)
     return application
 
 

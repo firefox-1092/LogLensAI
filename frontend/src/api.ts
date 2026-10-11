@@ -29,6 +29,28 @@ export type PaginatedEntries = {
   total_pages: number;
 };
 
+export type EvidenceReference = {
+  id: string;
+  line_number: number;
+  timestamp: string | null;
+  severity: string | null;
+  message: string;
+  raw_line: string | null;
+  parsed: boolean;
+};
+
+export type AIChatResponse = {
+  answer: string;
+  evidence: EvidenceReference[];
+  cited_evidence: EvidenceReference[];
+  completion_status: 'complete' | 'unknown';
+};
+
+export type AIChatHistoryTurn = {
+  question: string;
+  answer: string;
+};
+
 async function readResponse<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -61,4 +83,17 @@ export async function fetchEntries(
   if (options.query) params.set('q', options.query);
   const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/entries?${params}`, { signal });
   return readResponse<PaginatedEntries>(response);
+}
+
+export async function askDatasetQuestion(
+  uploadId: string,
+  question: string,
+  history: AIChatHistoryTurn[] = [],
+): Promise<AIChatResponse> {
+  const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/ai/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, history: history.slice(-4) }),
+  });
+  return readResponse<AIChatResponse>(response);
 }

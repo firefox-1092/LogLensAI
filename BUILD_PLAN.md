@@ -17,7 +17,7 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - Verify frontend and backend start locally.
 - If PostgreSQL/Docker setup is not available, explain options and get approval before choosing a temporary alternative.
 
-## Phase 2 — Log parsing and persistence (implemented; live PostgreSQL check pending)
+## Phase 2 — Log parsing and persistence (implemented and verified with PostgreSQL)
 - Define SQLAlchemy dataset/log-entry models and a local table setup path using `Base.metadata.create_all`.
 - Add PostgreSQL Compose service with a named volume, health check, and localhost-only port 5433.
 - Implement bounded `.log`/`.txt` upload validation, UTF-8 decoding, parsing, and parsing summary.
@@ -26,9 +26,9 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - Add an isolated in-memory SQLite test strategy so tests cannot reset development PostgreSQL data.
 - Add a synthetic sample log and document local database configuration and run commands.
 - [x] Parser, validation, upload/API, persistence, health, filtering, pagination, and frontend build checks pass against the isolated test setup.
-- [ ] Start PostgreSQL through Compose and verify a live PostgreSQL upload after the required settings are added to the local `.env` file.
+- [x] Start PostgreSQL through Compose and verify a live PostgreSQL upload.
 
-## Phase 3 — Deterministic log explorer and analytics
+## Phase 3 — Deterministic log explorer and analytics (implemented)
 - Implement severity/text/service/time filters supported by the parser.
 - Implement deterministic counts and repeated-message summaries.
 - Build React upload flow, metrics, log table, filters, loading/error/empty states.
@@ -43,11 +43,12 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - Treat log content as untrusted data; defend against instructions embedded in logs.
 - Mock LLM calls in tests and add graceful handling of unavailable/misconfigured providers.
 - Never make the core application unusable if the external LLM is unavailable; display a clear error and keep non-AI features working.
+- [x] Implemented provider-neutral dataset question answering with Groq as the default, configurable OpenRouter support, bounded evidence retrieval, source references, safe provider errors, mocked provider tests, and a dataset-scoped frontend assistant. The UI reports when completion metadata is unavailable. No summary endpoint or semantic retrieval is included.
 
 ## Phase 5 — Demo readiness
 - Add optional saved reports if the essential workflow is stable.
 - Create a synthetic sample log file with varied severities and repeated errors.
-- Run backend tests and frontend lint/build/tests.
+- Run backend tests and frontend TypeScript/build checks.
 - Complete README, endpoint documentation, known limitations, screenshots, and an architecture diagram.
 - Walk through the entire demo from a clean setup.
 

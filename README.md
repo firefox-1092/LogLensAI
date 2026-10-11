@@ -11,6 +11,7 @@ LogLens turns raw application logs into structured, searchable evidence. Phase 2
 - **Database:** PostgreSQL 16 in Docker Compose for local development. A named volume keeps data when the container stops.
 - **Parser:** a small Python module extracts timestamps, supported severity levels, and messages. It retains unsupported non-empty lines as unparsed records.
 - **Tests:** backend tests use an isolated in-memory SQLite database. They do not connect to or reset the development PostgreSQL database.
+- **AI assistant:** FastAPI retrieves evidence from the selected PostgreSQL dataset and sends bounded, untrusted log context to the configured Groq or OpenRouter model. Responses include source references and report whether the provider confirmed normal completion.
 
 The API creates missing tables at startup with SQLAlchemy `create_all`. A schema migration tool is not part of this phase.
 
@@ -31,7 +32,7 @@ if [ ! -f .env ]; then cp .env.example .env; fi
 
 Set a private local value for `POSTGRES_PASSWORD` in `.env`. Do not commit `.env` or share its contents. PostgreSQL uses `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`; the backend connects to `127.0.0.1` using `POSTGRES_HOST_PORT` (default `5433`). `LOG_LENS_MAX_UPLOAD_BYTES` defaults to 10 MiB. `LOG_LENS_CORS_ORIGINS` and `VITE_API_BASE_URL` configure browser communication.
 
-If you already have a local `.env` file (for example, from Phase 1), preserve it and add these missing settings locally:
+If you already have a local `.env` file, preserve its existing values and add only settings that are missing. Provider settings are:
 
 ```dotenv
 POSTGRES_DB=loglens
@@ -39,9 +40,22 @@ POSTGRES_USER=loglens
 POSTGRES_PASSWORD=<choose-a-private-local-password>
 POSTGRES_HOST_PORT=5433
 LOG_LENS_MAX_UPLOAD_BYTES=10485760
+GROQ_API_KEY=<your-private-groq-api-key>
+GROQ_MODEL=openai/gpt-oss-20b
+LLM_PROVIDER=groq
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=
 ```
 
 The placeholder in the example above is explanatory; replace it with a local password. `.env.example` uses a placeholder only. Vite variables are public browser settings and must not contain secrets.
+
+### AI provider setup
+
+For Groq, create an API key in the [Groq console](https://console.groq.com/keys), then set `LLM_PROVIDER=groq`, `GROQ_API_KEY`, and `GROQ_MODEL` in the ignored root `.env`. The existing model default is `openai/gpt-oss-20b`; choose a model available to your Groq account.
+
+For OpenRouter, create an API key in [OpenRouter settings](https://openrouter.ai/settings/keys), then set `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL`. Select a model ID from [OpenRouter's model list](https://openrouter.ai/models); LogLens intentionally does not choose a default OpenRouter model. Some models have zero listed input/output pricing, but availability, free-tier terms, context limits and rate limits can change. Check the model listing and account terms before use.
+
+The backend loads the root `.env` at startup. Provider keys remain backend-only and are never returned to the browser. To switch providers, stop the backend, change `LLM_PROVIDER` and the corresponding key/model settings in `.env`, then restart it. Do not remove the other provider's values if you want to switch back easily. Never commit `.env`. Sanitize sensitive log contents before sending relevant entries to a hosted provider.
 
 ## Setup in Git Bash
 
@@ -105,6 +119,9 @@ Open `http://127.0.0.1:5173`. The existing backend connection indicator remains.
 | `POST /api/uploads` | Multipart form field named `file` | Upload ID, filename, byte size, and parsed/unparsed counts; HTTP 201 |
 | `GET /api/uploads?limit=20` | Optional recent-list limit, 1–100 | Recent upload records and their counts |
 | `GET /api/uploads/{upload_id}/entries` | Optional `page` (default 1), `page_size` (default 50, max 100), `severity`, and `q` | `items`, `page`, `page_size`, `total`, and `total_pages` |
+| `POST /api/uploads/{upload_id}/ai/chat` | JSON body: `{"question":"Why did the database connection fail?"}` | Grounded `answer`, bounded `evidence` references, and `completion_status` (`complete` or `unknown`) |
+
+After uploading a dataset, use the **Ask about these logs** panel for questions about it. Follow-up questions include at most the four most recent question/answer turns as context. The backend includes the complete dataset when it fits within the configured entry and evidence-context limits. Larger datasets use up to 100 keyword candidates and at most 12 evidence entries, each message capped at 1,200 characters. The prompt identifies whether evidence is complete or a subset. Log text is treated as untrusted evidence; the assistant is instructed to ignore embedded instructions, distinguish facts from hypotheses, and cite only supplied lines. These safeguards cannot guarantee that an LLM never makes a mistake; verify important conclusions against the displayed source entries.
 
 Upload a sample with Git Bash `curl`:
 
@@ -142,9 +159,12 @@ npm run build
 
 Tests use their own in-memory SQLite database. They exercise persistence and API behavior without modifying the Compose PostgreSQL volume.
 
+AI provider requests are mocked in tests. The suite does not need real API keys and does not make live provider requests. A confirmed token-limit finish reason produces a clear incomplete-response error. If a provider omits its finish reason, the answer is returned with a “completion status unknown” notice instead of being labeled complete. Provider availability, model-specific output limits, account quotas and rate limits can affect live responses. Groq's and OpenRouter's limits and model availability vary by account and model; consult [Groq's API reference](https://console.groq.com/docs/api-reference) and [OpenRouter's model list](https://openrouter.ai/models) for current details.
+
 ## Current limitations
 
 - Only the documented timestamp + severity + message format is parsed. Other formats and multiline stack-trace grouping are not yet supported.
 - Data is stored in PostgreSQL; uploaded file bytes are not retained separately. There is no delete/export interface yet.
 - SQLAlchemy `create_all` creates missing tables but does not migrate existing schemas.
-- There is no LLM summary or chat, dashboard analytics, authentication, deployment, or CI/CD yet.
+- AI is currently keyword-retrieval question answering only. There is no dedicated whole-dataset summary endpoint, semantic retrieval, saved chat history, dashboard analytics, authentication, deployment, or CI/CD yet.
+- The selected hosted provider, its model availability and account rate limits affect assistant responses. Without valid credentials and model configuration for the selected provider, ordinary log upload and exploration continue to work, but AI requests return a configuration error.

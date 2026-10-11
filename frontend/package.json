@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build --configLoader runner",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test src/markdown.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
