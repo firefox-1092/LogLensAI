@@ -29,10 +29,11 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 - [x] Start PostgreSQL through Compose and verify a live PostgreSQL upload.
 
 ## Phase 3 — Deterministic log explorer and analytics (implemented)
-- Implement severity/text/service/time filters supported by the parser.
-- Implement deterministic counts and repeated-message summaries.
-- Build React upload flow, metrics, log table, filters, loading/error/empty states.
-- Verify frontend API contracts and test the principal journey.
+- [x] Implement severity/text filters, upload flow, dataset metrics, log table, and pagination (from Phase 2).
+- [x] Add dataset-scoped deterministic severity counts, warning/error totals, normalized recurring-error patterns, and an automatically bucketed entry timeline.
+- [x] Add the React analytics overview with pattern, distribution, and activity views.
+- [x] Add isolated backend analytics and normalization regression tests.
+- [x] Complete backend suite: 59 tests passed; frontend TypeScript/production build passed; `git diff --check` passed on 2026-10-12.
 
 ## Phase 4 — Grounded AI features
 - Define a provider-neutral LLM service interface and backend-only provider configuration.

@@ -2,7 +2,7 @@
 
 **AI-Powered Application Log Analytics and Intelligent Error Analysis Platform**
 
-LogLens turns raw application logs into structured, searchable evidence. Phase 2 supports uploading `.log` and `.txt` files, parsing a documented timestamp/severity format, storing records in PostgreSQL, and browsing them with severity and keyword filters.
+LogLens turns raw application logs into structured, searchable evidence. It supports uploading `.log` and `.txt` files, parsing a documented timestamp/severity format, storing records in PostgreSQL, browsing them with severity and keyword filters, and reviewing deterministic per-dataset error analytics.
 
 ## Architecture
 
@@ -12,6 +12,7 @@ LogLens turns raw application logs into structured, searchable evidence. Phase 2
 - **Parser:** a small Python module extracts timestamps, supported severity levels, and messages. It retains unsupported non-empty lines as unparsed records.
 - **Tests:** backend tests use an isolated in-memory SQLite database. They do not connect to or reset the development PostgreSQL database.
 - **AI assistant:** FastAPI retrieves evidence from the selected PostgreSQL dataset and sends bounded, untrusted log context to the configured Groq or OpenRouter model. Responses include source references and report whether the provider confirmed normal completion.
+- **Analytics:** FastAPI computes dataset-scoped severity counts, error/warning totals, normalized recurring-error patterns, and a timeline directly from stored entries. Analytics are deterministic and do not call an LLM.
 
 The API creates missing tables at startup with SQLAlchemy `create_all`. A schema migration tool is not part of this phase.
 
@@ -118,10 +119,13 @@ Open `http://127.0.0.1:5173`. The existing backend connection indicator remains.
 | `GET /health` | None | `{"status":"healthy"}` |
 | `POST /api/uploads` | Multipart form field named `file` | Upload ID, filename, byte size, and parsed/unparsed counts; HTTP 201 |
 | `GET /api/uploads?limit=20` | Optional recent-list limit, 1–100 | Recent upload records and their counts |
-| `GET /api/uploads/{upload_id}/entries` | Optional `page` (default 1), `page_size` (default 50, max 100), `severity`, and `q` | `items`, `page`, `page_size`, `total`, and `total_pages` |
+| `GET /api/uploads/{upload_id}/entries` | Optional `page` (default 1), `page_size` (default 50, max 100), `severity`, `q`, and exact `line_number` | `items`, `page`, `page_size`, `total`, and `total_pages` |
+| `GET /api/uploads/{upload_id}/analytics` | Dataset upload ID | Severity counts, error/warning totals, up to 10 recurring error patterns, and timestamped entry activity buckets |
 | `POST /api/uploads/{upload_id}/ai/chat` | JSON body: `{"question":"Why did the database connection fail?"}` | Grounded `answer`, bounded `evidence` references, and `completion_status` (`complete` or `unknown`) |
 
-After uploading a dataset, use the **Ask about these logs** panel for questions about it. Follow-up questions include at most the four most recent question/answer turns as context. The backend includes the complete dataset when it fits within the configured entry and evidence-context limits. Larger datasets use up to 100 keyword candidates and at most 12 evidence entries, each message capped at 1,200 characters. The prompt identifies whether evidence is complete or a subset. Log text is treated as untrusted evidence; the assistant is instructed to ignore embedded instructions, distinguish facts from hypotheses, and cite only supplied lines. These safeguards cannot guarantee that an LLM never makes a mistake; verify important conclusions against the displayed source entries.
+After uploading a dataset, the page shows a deterministic overview of severity counts, errors, warnings, recurring error patterns, and entry activity over time. Pattern grouping is case-insensitive, collapses whitespace, and replaces timestamps, UUIDs, and valid IPv4 addresses; severity stays part of the pattern key, and numeric values such as HTTP status codes are preserved. The dashboard lists up to 10 patterns, ordered by occurrence count, with representative source line numbers.
+
+Use the **Ask about these logs** panel for AI questions. Follow-up questions include at most the four most recent question/answer turns as context. The backend includes the complete dataset when it fits within the configured entry and evidence-context limits. Larger datasets use up to 100 keyword candidates and at most 12 evidence entries, each message capped at 1,200 characters. The prompt identifies whether evidence is complete or a subset. Log text is treated as untrusted evidence; the assistant is instructed to ignore embedded instructions, distinguish facts from hypotheses, and cite only supplied lines. These safeguards cannot guarantee that an LLM never makes a mistake; verify important conclusions against the displayed source entries.
 
 Upload a sample with Git Bash `curl`:
 
@@ -166,5 +170,6 @@ AI provider requests are mocked in tests. The suite does not need real API keys 
 - Only the documented timestamp + severity + message format is parsed. Other formats and multiline stack-trace grouping are not yet supported.
 - Data is stored in PostgreSQL; uploaded file bytes are not retained separately. There is no delete/export interface yet.
 - SQLAlchemy `create_all` creates missing tables but does not migrate existing schemas.
-- AI is currently keyword-retrieval question answering only. There is no dedicated whole-dataset summary endpoint, semantic retrieval, saved chat history, dashboard analytics, authentication, deployment, or CI/CD yet.
+- AI is currently keyword-retrieval question answering only. There is no dedicated whole-dataset summary endpoint, semantic retrieval, saved chat history, authentication, deployment, or CI/CD yet.
+- Analytics group error-like entries (`ERROR`, `FATAL`, and `CRITICAL`) using simple normalization, not semantic similarity. Only the top 10 patterns are shown; the API reports the full unique and recurring pattern counts. Activity buckets use records with timestamps; unparsed lines are counted separately and do not contribute to timestamped activity.
 - The selected hosted provider, its model availability and account rate limits affect assistant responses. Without valid credentials and model configuration for the selected provider, ordinary log upload and exploration continue to work, but AI requests return a configuration error.

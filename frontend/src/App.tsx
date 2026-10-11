@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { askDatasetQuestion, checkHealth, fetchEntries, uploadLogFile } from './api';
-import type { AIChatResponse, LogEntry, PaginatedEntries, UploadSummary } from './api';
+import { askDatasetQuestion, checkHealth, fetchDatasetAnalytics, fetchEntries, uploadLogFile } from './api';
+import type { AIChatResponse, DatasetAnalytics, LogEntry, PaginatedEntries, UploadSummary } from './api';
 import { parseAssistantMarkdown } from './markdown.mjs';
 import type { InlineToken } from './markdown.mjs';
 
@@ -53,7 +53,13 @@ export default function App() {
   const [entries, setEntries] = useState<PaginatedEntries | null>(null);
   const [entriesLoading, setEntriesLoading] = useState(false);
   const [entriesError, setEntriesError] = useState('');
+  const [analytics, setAnalytics] = useState<DatasetAnalytics | null>(null);
+  const [analyticsDatasetId, setAnalyticsDatasetId] = useState('');
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState('');
+  const [analyticsAttempt, setAnalyticsAttempt] = useState(0);
   const [page, setPage] = useState(1);
+  const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [severity, setSeverity] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,7 +89,7 @@ export default function App() {
     const controller = new AbortController();
     setEntriesLoading(true);
     setEntriesError('');
-    void fetchEntries(dataset.id, { page, pageSize: PAGE_SIZE, severity, query: searchTerm }, controller.signal)
+    void fetchEntries(dataset.id, { page, pageSize: PAGE_SIZE, severity, query: searchTerm, lineNumber: selectedLine }, controller.signal)
       .then(setEntries)
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
@@ -94,7 +100,27 @@ export default function App() {
         if (!controller.signal.aborted) setEntriesLoading(false);
       });
     return () => controller.abort();
-  }, [dataset, page, searchTerm, severity]);
+  }, [dataset, page, searchTerm, selectedLine, severity]);
+
+  useEffect(() => {
+    if (!dataset) return;
+    const controller = new AbortController();
+    setAnalytics(null);
+    setAnalyticsDatasetId(dataset.id);
+    setAnalyticsLoading(true);
+    setAnalyticsError('');
+    void fetchDatasetAnalytics(dataset.id, controller.signal)
+      .then(setAnalytics)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setAnalyticsError(error instanceof Error ? error.message : 'Could not load dataset analytics.');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAnalyticsLoading(false);
+      });
+    return () => controller.abort();
+  }, [dataset, analyticsAttempt]);
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -109,8 +135,10 @@ export default function App() {
       setSearchInput('');
       setSearchTerm('');
       setPage(1);
+      setSelectedLine(null);
       setAssistantTurns([]);
       setAssistantError('');
+      setAnalytics(null);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'The file could not be uploaded.');
     } finally {
@@ -121,6 +149,7 @@ export default function App() {
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPage(1);
+    setSelectedLine(null);
     setSearchTerm(searchInput.trim());
   }
 
@@ -218,6 +247,62 @@ export default function App() {
               <div className="metric muted"><strong>{dataset.unparsed_entries}</strong><small>UNPARSED</small></div>
             </div>
 
+            <section className="analytics-panel" aria-label="Dataset analytics" aria-busy={analyticsLoading}>
+              <div className="section-heading analytics-heading">
+                <div><div className="eyebrow"><span className="eyebrow-line" /> DETERMINISTIC ANALYTICS</div><h2>Dataset overview</h2></div>
+                <span className="local-note">Counts and patterns are computed from this dataset</span>
+              </div>
+              {analyticsLoading ? <div className="table-message"><span className="spinner" /> Calculating dataset analytics…</div> : analyticsError ? (
+                <div className="analytics-error" role="alert"><span>{analyticsError}</span><button type="button" onClick={() => setAnalyticsAttempt((value) => value + 1)}>Retry analytics</button></div>
+              ) : analytics && analyticsDatasetId === dataset.id ? (
+                <>
+                  <div className="analytics-metrics">
+                    <div className="analytics-metric"><strong>{analytics.error_count}</strong><span>ERROR EVENTS</span></div>
+                    <div className="analytics-metric"><strong>{analytics.warning_count}</strong><span>WARNINGS</span></div>
+                    <div className="analytics-metric"><strong>{analytics.unique_error_patterns}</strong><span>UNIQUE ERROR PATTERNS</span></div>
+                    <div className="analytics-metric"><strong>{analytics.recurring_error_patterns}</strong><span>RECURRING PATTERNS</span></div>
+                    <div className="analytics-metric"><strong>{analytics.unparsed_entries}</strong><span>UNPARSED ENTRIES</span></div>
+                  </div>
+                  <div className="analytics-grid">
+                    <section className="analytics-card" aria-label="Severity distribution">
+                      <h3>Severity distribution</h3>
+                      <div className="severity-chart">
+                        {Object.entries(analytics.severity_counts).map(([level, count]) => {
+                          const maxCount = Math.max(...Object.values(analytics.severity_counts), 1);
+                          return <div className="severity-row" key={level}>
+                            <span>{level}</span><div className="bar-track"><div className={`bar-fill ${level.toLowerCase()}`} style={{ width: `${(count / maxCount) * 100}%` }} /></div><strong>{count}</strong>
+                          </div>;
+                        })}
+                      </div>
+                    </section>
+                    <section className="analytics-card timeline-card" aria-label="Entry activity timeline">
+                      <h3>Entry activity <small>{analytics.timeline.bucket_unit === 'none' ? 'no timestamps' : `per ${analytics.timeline.bucket_interval > 1 ? `${analytics.timeline.bucket_interval} ` : ''}${analytics.timeline.bucket_unit}`}</small></h3>
+                      {analytics.timeline.buckets.length ? <div className="timeline-chart" role="img" aria-label={`${analytics.timeline.buckets.length} time buckets with uploaded log entries`}>
+                        {analytics.timeline.buckets.map((bucket) => {
+                          const maximum = Math.max(...analytics.timeline.buckets.map((item) => item.entries), 1);
+                          return <div className="timeline-column" key={bucket.timestamp} title={`${formatTimestamp(bucket.timestamp)} · ${bucket.entries} entries`}>
+                            <div className="timeline-bar" style={{ height: `${Math.max((bucket.entries / maximum) * 100, bucket.entries ? 5 : 0)}%` }} />
+                          </div>;
+                        })}
+                      </div> : <p className="analytics-empty">No parsed timestamps are available for a timeline.</p>}
+                      {analytics.timeline.buckets.length > 0 && <div className="timeline-labels"><span>{formatTimestamp(analytics.timeline.buckets[0].timestamp)}</span><span>{formatTimestamp(analytics.timeline.buckets[analytics.timeline.buckets.length - 1].timestamp)}</span></div>}
+                    </section>
+                  </div>
+                  <section className="analytics-card patterns-card">
+                    <div className="pattern-heading"><div><h3>Top Error Patterns</h3><p>Messages are grouped by severity after case, whitespace, timestamp, UUID, and valid IPv4 normalization. Numeric values such as status codes remain distinct.</p></div><span>TOP {analytics.error_patterns.length} / {analytics.unique_error_patterns}</span></div>
+                    {analytics.error_patterns.length ? <div className="pattern-list">{analytics.error_patterns.map((pattern) => (
+                      <article className="pattern-row" key={pattern.fingerprint}>
+                        <div className="pattern-level"><span className={`severity-badge ${pattern.severity.toLowerCase()}`}>{pattern.severity}</span><strong>{pattern.occurrences} occurrence{pattern.occurrences === 1 ? '' : 's'}</strong>{pattern.occurrences >= 2 && <span className="recurring-badge">Recurring</span>}</div>
+                        <p>{pattern.representative_message}</p>
+                        <small>Representative lines: {pattern.representative_line_numbers.map((lineNumber, lineIndex) => <span key={lineNumber}>{lineIndex > 0 ? ', ' : ''}<button type="button" className="line-link" onClick={() => { setSelectedLine(lineNumber); setPage(1); setSearchInput(''); setSearchTerm(''); setSeverity(''); }}>{lineNumber}</button></span>)}{pattern.distinct_message_count > 1 ? ` · ${pattern.distinct_message_count} message variations grouped` : ''}</small>
+                        <small>{pattern.first_timestamp ? formatTimestamp(pattern.first_timestamp) : 'No timestamp'}{pattern.last_timestamp && pattern.last_timestamp !== pattern.first_timestamp ? ` — ${formatTimestamp(pattern.last_timestamp)}` : ''}</small>
+                      </article>
+                    ))}</div> : <p className="analytics-empty">No error patterns were found in this dataset. ERROR, FATAL, and CRITICAL entries will appear here.</p>}
+                  </section>
+                </>
+              ) : null}
+            </section>
+
             <section className="assistant-panel" aria-label="AI log assistant">
               <div className="assistant-heading">
                 <div><div className="eyebrow"><span className="eyebrow-line" /> AI ASSISTANT</div><h2>Ask about these logs</h2></div>
@@ -248,14 +333,14 @@ export default function App() {
               {assistantError && <p className="form-error" role="alert">{assistantError}</p>}
             </section>
 
-            <div className="entries-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> SOURCE RECORDS</div><h2>Log entries</h2></div><span className="entry-count">{entries?.total ?? '—'} matching records</span></div>
+            <div className="entries-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> SOURCE RECORDS</div><h2>Log entries</h2></div><span className="entry-count">{selectedLine ? `Line ${selectedLine} · ` : ''}{entries?.total ?? '—'} matching records</span></div>
             <div className="filters">
               <form className="search-form" onSubmit={handleSearch}>
                 <span aria-hidden="true">⌕</span><input aria-label="Search log messages" maxLength={200} value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search messages…" />
                 <button type="submit">Search</button>
               </form>
               <label className="severity-control">Severity
-                <select value={severity} onChange={(event) => { setSeverity(event.target.value); setPage(1); }}>
+                <select value={severity} onChange={(event) => { setSeverity(event.target.value); setSelectedLine(null); setPage(1); }}>
                   <option value="">All levels</option>
                   <option>TRACE</option><option>DEBUG</option><option>INFO</option><option>WARN</option><option>ERROR</option><option>FATAL</option><option>CRITICAL</option>
                 </select>
@@ -285,7 +370,7 @@ export default function App() {
         )}
       </section>
 
-      <footer><span>LOG LENS <span className="footer-dot">·</span> PHASE 2</span><span>Built for clearer debugging</span></footer>
+      <footer><span>LOG LENS <span className="footer-dot">·</span> PHASE 3</span><span>Built for clearer debugging</span></footer>
     </main>
   );
 }

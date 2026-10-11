@@ -40,6 +40,52 @@ class PaginatedEntriesResponse(BaseModel):
     total_pages: int
 
 
+class SeverityCounts(BaseModel):
+    TRACE: int
+    DEBUG: int
+    INFO: int
+    WARN: int
+    ERROR: int
+    FATAL: int
+    CRITICAL: int
+
+
+class ErrorPattern(BaseModel):
+    fingerprint: str
+    severity: str
+    representative_message: str
+    occurrences: int
+    recurring: bool
+    first_timestamp: datetime | None
+    last_timestamp: datetime | None
+    representative_line_numbers: list[int]
+    distinct_message_count: int
+
+
+class TimelineBucket(BaseModel):
+    timestamp: datetime
+    entries: int
+
+
+class DatasetTimeline(BaseModel):
+    bucket_unit: Literal["minute", "hour", "day", "week", "none"]
+    bucket_interval: int = 1
+    buckets: list[TimelineBucket]
+
+
+class DatasetAnalyticsResponse(BaseModel):
+    total_entries: int
+    parsed_entries: int
+    unparsed_entries: int
+    error_count: int
+    warning_count: int
+    unique_error_patterns: int
+    recurring_error_patterns: int
+    severity_counts: SeverityCounts
+    error_patterns: list[ErrorPattern]
+    timeline: DatasetTimeline
+
+
 class AIChatHistoryTurn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     answer: str = Field(min_length=1, max_length=2000)

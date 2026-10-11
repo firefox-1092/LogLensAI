@@ -80,6 +80,10 @@ def test_entry_pagination_severity_and_keyword_filters(client: TestClient) -> No
     ).json()
     assert matches["total"] == 2
 
+    source_line = client.get(f"/api/uploads/{upload_id}/entries?line_number=3")
+    assert source_line.json()["total"] == 1
+    assert source_line.json()["items"][0]["line_number"] == 3
+
 
 @pytest.mark.parametrize(
     ("filename", "content", "limit", "expected_status"),

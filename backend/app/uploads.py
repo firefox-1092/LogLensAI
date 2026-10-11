@@ -9,10 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .database import get_db
+from .analytics import build_dataset_analytics
 from .ingestion import EmptyLogFileError, persist_parsed_upload
 from .models import LogEntry, UploadedDataset
 from .parser import SEVERITIES
-from .schemas import PaginatedEntriesResponse, UploadResponse
+from .schemas import DatasetAnalyticsResponse, PaginatedEntriesResponse, UploadResponse
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _CHUNK_SIZE = 64 * 1024
@@ -87,6 +88,7 @@ def list_entries(
     upload_id: str,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
+    line_number: int | None = Query(default=None, ge=1),
     severity: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
     db: Session = Depends(get_db),
@@ -101,6 +103,8 @@ def list_entries(
         raise HTTPException(status_code=404, detail="Upload not found.")
 
     conditions = [LogEntry.dataset_id == dataset_id]
+    if line_number is not None:
+        conditions.append(LogEntry.line_number == line_number)
     if severity:
         normalized_severity = severity.upper()
         if normalized_severity == "WARNING":
@@ -129,3 +133,16 @@ def list_entries(
         total=total,
         total_pages=total_pages,
     )
+
+
+@router.get("/{upload_id}/analytics", response_model=DatasetAnalyticsResponse)
+def get_dataset_analytics(upload_id: str, db: Session = Depends(get_db)) -> dict:
+    """Return deterministic counts and recurring-error patterns for one upload."""
+    try:
+        dataset_id = uuid.UUID(upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="upload_id must be a valid UUID.") from exc
+
+    if db.get(UploadedDataset, dataset_id) is None:
+        raise HTTPException(status_code=404, detail="Upload not found.")
+    return build_dataset_analytics(db, dataset_id)
