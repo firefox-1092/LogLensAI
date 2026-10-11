@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.vite/
+frontend/.npm-cache/
