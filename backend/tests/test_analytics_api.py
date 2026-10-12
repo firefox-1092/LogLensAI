@@ -3,7 +3,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.analytics import MAX_ERROR_PATTERNS, normalize_error_message
+from backend.app.analytics import MAX_ERROR_PATTERNS, error_message_template, normalize_error_message
 from backend.app.main import create_app
 
 
@@ -38,6 +38,13 @@ def test_normalization_groups_volatile_values_but_preserves_status_codes() -> No
     assert normalize_error_message("Request failed status 401") != other_status
 
 
+def test_display_template_uses_readable_placeholders_and_preserves_case() -> None:
+    template = error_message_template("Connection to 192.168.1.10 timed out")
+
+    assert template == "Connection to <IP_ADDRESS> timed out"
+    assert error_message_template("Literal <IP> placeholder") == "Literal <IP> placeholder"
+
+
 def test_analytics_summarizes_only_selected_dataset(client: TestClient) -> None:
     selected = upload(
         client,
@@ -68,9 +75,13 @@ def test_analytics_summarizes_only_selected_dataset(client: TestClient) -> None:
     assert recurring["occurrences"] == 2
     assert recurring["representative_line_numbers"] == [1, 2]
     assert recurring["distinct_message_count"] == 2
+    assert recurring["normalized_message_template"] == "Request failed at <IP_ADDRESS> status 401"
     assert all("Foreign dataset" not in pattern["representative_message"] for pattern in result["error_patterns"])
     assert result["timeline"]["bucket_unit"] == "minute"
     assert sum(bucket["entries"] for bucket in result["timeline"]["buckets"]) == 4
+    assert result["timeline"]["buckets"] == [
+        {"timestamp": "2026-10-11T10:00:00", "entries": 4, "error_count": 3, "warning_count": 1},
+    ]
 
 
 def test_analytics_has_empty_timeline_without_parsed_timestamps(client: TestClient) -> None:
@@ -115,6 +126,8 @@ def test_timeline_automatically_uses_wider_bounded_buckets(client: TestClient) -
     assert timeline["bucket_interval"] > 1
     assert len(timeline["buckets"]) <= 100
     assert sum(bucket["entries"] for bucket in timeline["buckets"]) == 2
+    assert sum(bucket["error_count"] for bucket in timeline["buckets"]) == 0
+    assert sum(bucket["warning_count"] for bucket in timeline["buckets"]) == 0
 
 
 def test_analytics_rejects_invalid_or_missing_dataset(client: TestClient) -> None:

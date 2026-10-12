@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build --configLoader runner",
     "preview": "vite preview",
-    "test": "node --test src/markdown.test.mjs"
+    "test": "node --test src/markdown.test.mjs src/presentation.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

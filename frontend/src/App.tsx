@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { askDatasetQuestion, checkHealth, fetchDatasetAnalytics, fetchEntries, uploadLogFile } from './api';
-import type { AIChatResponse, DatasetAnalytics, LogEntry, PaginatedEntries, UploadSummary } from './api';
+import type { AIChatResponse, DatasetAnalytics, EvidenceReference, LogEntry, PaginatedEntries, UploadSummary } from './api';
 import { parseAssistantMarkdown } from './markdown.mjs';
 import type { InlineToken } from './markdown.mjs';
+import { getCitedLineSegments, getTimelineBarHeight, selectTimelineLabelIndices } from './presentation.mjs';
 
 type ConnectionState = 'loading' | 'connected' | 'error';
 const PAGE_SIZE = 25;
@@ -19,25 +20,60 @@ function formatTimestamp(timestamp: string | null): string {
   return timestamp.replace('T', ' ').slice(0, 19);
 }
 
-function renderInlineMarkdown(tokens: InlineToken[]): ReactNode[] {
-  return tokens.map((token, index) => {
-    if (token.type === 'strong') return <strong key={index}>{token.value}</strong>;
-    if (token.type === 'emphasis') return <em key={index}>{token.value}</em>;
-    if (token.type === 'code') return <code key={index}>{token.value}</code>;
-    return token.value;
+function formatTimelineLabel(timestamp: string, unit: DatasetAnalytics['timeline']['bucket_unit']): string {
+  const value = formatTimestamp(timestamp);
+  if (unit === 'minute') return value.slice(11, 16);
+  if (unit === 'hour') return value.slice(5, 16);
+  return value.slice(0, 10);
+}
+
+function renderInlineMarkdown(
+  tokens: InlineToken[],
+  citedLines: Set<number>,
+  onCitation: (lineNumber: number) => void,
+): ReactNode[] {
+  return tokens.flatMap((token, tokenIndex) => {
+    const segments = token.type === 'code'
+      ? [{ type: 'text' as const, value: token.value }]
+      : getCitedLineSegments(token.value, citedLines);
+    const content = segments.map((segment, segmentIndex) => segment.type === 'line'
+      ? <button
+          className="citation-link"
+          type="button"
+          key={`${tokenIndex}-${segmentIndex}`}
+          aria-label={`Open cited log line ${segment.lineNumber}`}
+          onClick={() => onCitation(segment.lineNumber)}
+        >{segment.value}</button>
+      : <span key={`${tokenIndex}-${segmentIndex}`}>{segment.value}</span>);
+
+    if (token.type === 'strong') return [<strong key={tokenIndex}>{content}</strong>];
+    if (token.type === 'emphasis') return [<em key={tokenIndex}>{content}</em>];
+    if (token.type === 'code') return [<code key={tokenIndex}>{content}</code>];
+    return content;
   });
 }
 
-function renderAssistantAnswer(answer: string): ReactNode {
+function renderAssistantAnswer(
+  answer: string,
+  citedEvidence: EvidenceReference[],
+  onCitation: (lineNumber: number) => void,
+): ReactNode {
+  const citedLines = new Set(citedEvidence.map((item) => item.line_number));
   const blocks = parseAssistantMarkdown(answer).map((block, index) => {
     if (block.type === 'heading') {
-      const heading = renderInlineMarkdown(block.tokens);
-      if (block.level === 1) return <h1 key={index}>{heading}</h1>;
-      if (block.level === 2) return <h2 key={index}>{heading}</h2>;
-      return <h3 key={index}>{heading}</h3>;
+      const heading = renderInlineMarkdown(block.tokens, citedLines, onCitation);
+      const headingText = block.tokens.map((token) => token.value).join('').toLowerCase();
+      const headingClass = headingText.includes('hypothes') || headingText.includes('explanation')
+        ? 'answer-heading hypothesis-heading'
+        : headingText.includes('observ') || headingText.includes('fact')
+          ? 'answer-heading fact-heading'
+          : 'answer-heading';
+      if (block.level === 1) return <h1 className={headingClass} key={index}>{heading}</h1>;
+      if (block.level === 2) return <h2 className={headingClass} key={index}>{heading}</h2>;
+      return <h3 className={headingClass} key={index}>{heading}</h3>;
     }
-    if (block.type === 'paragraph') return <p key={index}>{renderInlineMarkdown(block.tokens)}</p>;
-    const items = block.items.map((tokens, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(tokens)}</li>);
+    if (block.type === 'paragraph') return <p key={index}>{renderInlineMarkdown(block.tokens, citedLines, onCitation)}</p>;
+    const items = block.items.map((tokens, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(tokens, citedLines, onCitation)}</li>);
     return block.type === 'ordered-list' ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>;
   });
   return <div className="assistant-answer">{blocks}</div>;
@@ -67,6 +103,9 @@ export default function App() {
   const [assistantLoading, setAssistantLoading] = useState(false);
   const [assistantError, setAssistantError] = useState('');
   const [assistantTurns, setAssistantTurns] = useState<Array<{ question: string; result: AIChatResponse }>>([]);
+  const assistantRequestToken = useRef(0);
+  const activeDatasetId = useRef<string | null>(null);
+  activeDatasetId.current = dataset?.id ?? null;
 
   const checkBackend = useCallback(async (signal: AbortSignal) => {
     setConnection('loading');
@@ -129,6 +168,7 @@ export default function App() {
     setUploadError('');
     try {
       const result = await uploadLogFile(selectedFile);
+      assistantRequestToken.current += 1;
       setDataset(result);
       setEntries(null);
       setSeverity('');
@@ -138,6 +178,7 @@ export default function App() {
       setSelectedLine(null);
       setAssistantTurns([]);
       setAssistantError('');
+      setAssistantLoading(false);
       setAnalytics(null);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'The file could not be uploaded.');
@@ -157,6 +198,8 @@ export default function App() {
     event.preventDefault();
     if (!dataset || !assistantQuestion.trim()) return;
     const question = assistantQuestion.trim();
+    const datasetId = dataset.id;
+    const requestToken = ++assistantRequestToken.current;
     setAssistantLoading(true);
     setAssistantError('');
     try {
@@ -164,15 +207,35 @@ export default function App() {
         question: turn.question,
         answer: turn.result.answer,
       }));
-      const result = await askDatasetQuestion(dataset.id, question, history);
+      const result = await askDatasetQuestion(datasetId, question, history);
+      if (assistantRequestToken.current !== requestToken || activeDatasetId.current !== datasetId) return;
       setAssistantTurns((turns) => [...turns, { question, result }]);
       setAssistantQuestion('');
     } catch (error) {
-      setAssistantError(error instanceof Error ? error.message : 'The AI assistant could not answer right now.');
+      if (assistantRequestToken.current === requestToken && activeDatasetId.current === datasetId) {
+        setAssistantError(error instanceof Error ? error.message : 'The AI assistant could not answer right now.');
+      }
     } finally {
-      setAssistantLoading(false);
+      if (assistantRequestToken.current === requestToken) setAssistantLoading(false);
     }
   }
+
+  function focusLogLine(lineNumber: number) {
+    setSelectedLine(lineNumber);
+    setPage(1);
+    setSearchInput('');
+    setSearchTerm('');
+    setSeverity('');
+    document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  const timelineBuckets = analytics?.timeline.buckets ?? [];
+  const timelineMaximum = Math.max(...timelineBuckets.map((bucket) => bucket.entries), 0);
+  const timestampedEventCount = timelineBuckets.reduce((total, bucket) => total + bucket.entries, 0);
+  const timelineLabelIndices = selectTimelineLabelIndices(timelineBuckets.length);
+  const timelinePlotMinWidth = timelineBuckets.length > 32
+    ? Math.min(700, timelineBuckets.length * 7)
+    : null;
 
   return (
     <main className="page-shell">
@@ -205,7 +268,7 @@ export default function App() {
 
       </section>
 
-      <section className="workspace" aria-label="Log file explorer">
+      <section className="workspace" id="log-explorer" aria-label="Log file explorer">
         <div className="section-heading">
           <div><div className="eyebrow"><span className="eyebrow-line" /> LOG EXPLORER</div><h2>Start with a log file</h2></div>
           <span className="local-note">Files stay in your local LogLens database</span>
@@ -277,25 +340,77 @@ export default function App() {
                     </section>
                     <section className="analytics-card timeline-card" aria-label="Entry activity timeline">
                       <h3>Entry activity <small>{analytics.timeline.bucket_unit === 'none' ? 'no timestamps' : `per ${analytics.timeline.bucket_interval > 1 ? `${analytics.timeline.bucket_interval} ` : ''}${analytics.timeline.bucket_unit}`}</small></h3>
-                      {analytics.timeline.buckets.length ? <div className="timeline-chart" role="img" aria-label={`${analytics.timeline.buckets.length} time buckets with uploaded log entries`}>
-                        {analytics.timeline.buckets.map((bucket) => {
-                          const maximum = Math.max(...analytics.timeline.buckets.map((item) => item.entries), 1);
-                          return <div className="timeline-column" key={bucket.timestamp} title={`${formatTimestamp(bucket.timestamp)} · ${bucket.entries} entries`}>
-                            <div className="timeline-bar" style={{ height: `${Math.max((bucket.entries / maximum) * 100, bucket.entries ? 5 : 0)}%` }} />
-                          </div>;
-                        })}
-                      </div> : <p className="analytics-empty">No parsed timestamps are available for a timeline.</p>}
-                      {analytics.timeline.buckets.length > 0 && <div className="timeline-labels"><span>{formatTimestamp(analytics.timeline.buckets[0].timestamp)}</span><span>{formatTimestamp(analytics.timeline.buckets[analytics.timeline.buckets.length - 1].timestamp)}</span></div>}
+                      {timelineBuckets.length ? <>
+                        <div className="timeline-summary" aria-label="Dataset event totals">
+                          <span><strong>{timestampedEventCount}</strong> timestamped events</span>
+                          <span><strong>{analytics.error_count}</strong> dataset errors</span>
+                          <span><strong>{analytics.warning_count}</strong> dataset warnings</span>
+                        </div>
+                        <div className="timeline-viewport" role="region" aria-label="Scrollable activity timeline">
+                          <div className="timeline-plot" style={timelinePlotMinWidth ? { minWidth: `${timelinePlotMinWidth}px` } : undefined}>
+                            <div className="timeline-chart" role="group" aria-label={`Activity chart with ${timelineBuckets.length} time buckets`} style={{ gridTemplateColumns: `repeat(${timelineBuckets.length}, minmax(3px, 1fr))` }}>
+                              {timelineBuckets.map((bucket) => {
+                                const timestamp = formatTimestamp(bucket.timestamp);
+                                const interval = `${analytics.timeline.bucket_interval > 1 ? `${analytics.timeline.bucket_interval} ` : ''}${analytics.timeline.bucket_unit}`;
+                                return <div
+                                  className="timeline-column"
+                                  role="img"
+                                  tabIndex={0}
+                                  key={bucket.timestamp}
+                                  title={`${timestamp} · ${bucket.entries} events · ${bucket.error_count} errors · ${bucket.warning_count} warnings`}
+                                  aria-label={`${timestamp}, ${bucket.entries} events, ${bucket.error_count} errors, and ${bucket.warning_count} warnings in this ${interval} bucket`}
+                                >
+                                  <span className="timeline-bar" style={{ height: `${getTimelineBarHeight(bucket.entries, timelineMaximum)}%` }} />
+                                </div>;
+                              })}
+                            </div>
+                            <div className="timeline-axis" aria-hidden="true">
+                              {timelineLabelIndices.map((bucketIndex, labelIndex) => {
+                                const bucket = timelineBuckets[bucketIndex];
+                                const edge = labelIndex === 0 || labelIndex === timelineLabelIndices.length - 1;
+                                const left = timelineBuckets.length === 1 ? 0 : (bucketIndex / (timelineBuckets.length - 1)) * 100;
+                                return <span
+                                  className={`timeline-axis-label${edge ? ' edge' : ' interior'}`}
+                                  key={bucket.timestamp}
+                                  style={{ left: `${left}%` }}
+                                  title={formatTimestamp(bucket.timestamp)}
+                                >{formatTimelineLabel(bucket.timestamp, analytics.timeline.bucket_unit)}</span>;
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                        <p className="sr-only">The chart contains {timestampedEventCount} timestamped events in {timelineBuckets.length} buckets. Dataset totals: {analytics.error_count} errors and {analytics.warning_count} warnings.</p>
+                      </> : <p className="analytics-empty">{analytics.total_entries === 0
+                        ? 'This dataset has no entries to plot.'
+                        : `No parsed timestamps are available to plot. All ${analytics.total_entries} records remain available in Log entries.`}</p>}
                     </section>
                   </div>
                   <section className="analytics-card patterns-card">
                     <div className="pattern-heading"><div><h3>Top Error Patterns</h3><p>Messages are grouped by severity after case, whitespace, timestamp, UUID, and valid IPv4 normalization. Numeric values such as status codes remain distinct.</p></div><span>TOP {analytics.error_patterns.length} / {analytics.unique_error_patterns}</span></div>
                     {analytics.error_patterns.length ? <div className="pattern-list">{analytics.error_patterns.map((pattern) => (
                       <article className="pattern-row" key={pattern.fingerprint}>
-                        <div className="pattern-level"><span className={`severity-badge ${pattern.severity.toLowerCase()}`}>{pattern.severity}</span><strong>{pattern.occurrences} occurrence{pattern.occurrences === 1 ? '' : 's'}</strong>{pattern.occurrences >= 2 && <span className="recurring-badge">Recurring</span>}</div>
-                        <p>{pattern.representative_message}</p>
-                        <small>Representative lines: {pattern.representative_line_numbers.map((lineNumber, lineIndex) => <span key={lineNumber}>{lineIndex > 0 ? ', ' : ''}<button type="button" className="line-link" onClick={() => { setSelectedLine(lineNumber); setPage(1); setSearchInput(''); setSearchTerm(''); setSeverity(''); }}>{lineNumber}</button></span>)}{pattern.distinct_message_count > 1 ? ` · ${pattern.distinct_message_count} message variations grouped` : ''}</small>
-                        <small>{pattern.first_timestamp ? formatTimestamp(pattern.first_timestamp) : 'No timestamp'}{pattern.last_timestamp && pattern.last_timestamp !== pattern.first_timestamp ? ` — ${formatTimestamp(pattern.last_timestamp)}` : ''}</small>
+                        <div className="pattern-card-heading">
+                          <span className={`severity-badge ${pattern.severity.toLowerCase()}`}>{pattern.severity}</span>
+                          <span className="pattern-occurrences"><strong>{pattern.occurrences}</strong> occurrence{pattern.occurrences === 1 ? '' : 's'}</span>
+                          {pattern.occurrences >= 2 && <span className="recurring-badge">Recurring</span>}
+                        </div>
+                        <p className="pattern-template">{pattern.normalized_message_template}</p>
+                        <p className="pattern-example"><span>Representative message</span><code>{pattern.representative_message}</code></p>
+                        <div className="pattern-details">
+                          <span>{pattern.distinct_message_count} message variation{pattern.distinct_message_count === 1 ? '' : 's'}</span>
+                          <span>First seen <time dateTime={pattern.first_timestamp ?? undefined}>{formatTimestamp(pattern.first_timestamp)}</time></span>
+                          <span>Last seen <time dateTime={pattern.last_timestamp ?? undefined}>{formatTimestamp(pattern.last_timestamp)}</time></span>
+                        </div>
+                        <div className="pattern-sources" aria-label="Representative source lines">
+                          <span>Source lines</span>
+                          {pattern.representative_line_numbers.map((lineNumber) => <button
+                            type="button"
+                            className="line-link"
+                            key={lineNumber}
+                            aria-label={`Open line ${lineNumber} in the selected dataset`}
+                            onClick={() => focusLogLine(lineNumber)}
+                          >{lineNumber}</button>)}
+                        </div>
                       </article>
                     ))}</div> : <p className="analytics-empty">No error patterns were found in this dataset. ERROR, FATAL, and CRITICAL entries will appear here.</p>}
                   </section>
@@ -311,12 +426,19 @@ export default function App() {
               {assistantTurns.map((turn, index) => (
                 <article className="assistant-turn" key={`${index}-${turn.question}`}>
                   <p className="assistant-question">{turn.question}</p>
-                  {renderAssistantAnswer(turn.result.answer)}
+                  {renderAssistantAnswer(turn.result.answer, turn.result.cited_evidence, focusLogLine)}
+                  <p className="assistant-result-meta" role="status">
+                    {turn.result.cited_evidence.length > 0
+                      ? `Response ready · ${turn.result.cited_evidence.length} cited entr${turn.result.cited_evidence.length === 1 ? 'y' : 'ies'}`
+                      : turn.result.evidence.length > 0
+                        ? `Response ready · no explicit citations · ${turn.result.evidence.length} entries available as context`
+                        : 'Response ready · no supporting entries were returned'}
+                  </p>
                   {turn.result.completion_status === 'unknown' && <p className="assistant-status">The provider did not report whether generation ended normally. Review the answer against the supporting entries.</p>}
                   {turn.result.evidence.length > 0 && <div className="evidence-list">
                     <strong>{turn.result.cited_evidence.length > 0 ? 'Supporting entries' : 'Available context'}</strong>
                     {(turn.result.cited_evidence.length > 0 ? turn.result.cited_evidence : turn.result.evidence).map((item) => <div className="evidence-item" key={item.id}>
-                      <span>Line {item.line_number}{item.severity ? ` · ${item.severity}` : ''}{!item.parsed ? ' · UNPARSED' : ''}</span><p>{!item.parsed ? item.raw_line ?? item.message : item.message}</p>
+                      <span><button type="button" className="line-link" aria-label={`Open supporting log line ${item.line_number}`} onClick={() => focusLogLine(item.line_number)}>Line {item.line_number}</button>{item.severity ? ` · ${item.severity}` : ''}{!item.parsed ? ' · UNPARSED' : ''}</span><p>{!item.parsed ? item.raw_line ?? item.message : item.message}</p>
                       {!item.parsed && <small>Original text retained; timestamp, severity, and structured meaning could not be reliably extracted.</small>}
                     </div>)}
                   </div>}
@@ -370,7 +492,7 @@ export default function App() {
         )}
       </section>
 
-      <footer><span>LOG LENS <span className="footer-dot">·</span> PHASE 3</span><span>Built for clearer debugging</span></footer>
+      <footer><span>LOG LENS <span className="footer-dot">·</span> PHASE 4</span><span>Built for clearer debugging</span></footer>
     </main>
   );
 }

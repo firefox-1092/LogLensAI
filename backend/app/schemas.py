@@ -53,6 +53,7 @@ class SeverityCounts(BaseModel):
 class ErrorPattern(BaseModel):
     fingerprint: str
     severity: str
+    normalized_message_template: str
     representative_message: str
     occurrences: int
     recurring: bool
@@ -65,6 +66,8 @@ class ErrorPattern(BaseModel):
 class TimelineBucket(BaseModel):
     timestamp: datetime
     entries: int
+    error_count: int
+    warning_count: int
 
 
 class DatasetTimeline(BaseModel):

@@ -36,6 +36,7 @@ export type AnalyticsSeverity = 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 
 export type ErrorPattern = {
   fingerprint: string;
   severity: string;
+  normalized_message_template: string;
   representative_message: string;
   occurrences: number;
   recurring: boolean;
@@ -58,7 +59,7 @@ export type DatasetAnalytics = {
   timeline: {
     bucket_unit: 'minute' | 'hour' | 'day' | 'week' | 'none';
     bucket_interval: number;
-    buckets: Array<{ timestamp: string; entries: number }>;
+    buckets: Array<{ timestamp: string; entries: number; error_count: number; warning_count: number }>;
   };
 };
 
