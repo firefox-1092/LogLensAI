@@ -53,9 +53,8 @@ This plan is intentionally staged. Finish and verify one milestone before moving
 ## Phase 5 — Demo readiness
 - [x] A synthetic sample log with varied severities and repeated errors is available at `backend/sample_logs/sample.log`.
 - [x] README setup, API overview, known limitations, and the current architecture diagram are documented.
-- User-provided application screenshots have been verified and added to the README presentation; mark the screenshot documentation task complete after the commit is verified.
+- [x] Add the three verified application screenshots to README with descriptions matching the visible dashboard, top error pattern, and AI assistant.
 - [ ] Add optional saved reports only if time allows; they are not part of the current implementation.
-- [ ] Capture screenshots if they are useful for the final demo or portfolio.
 - [ ] Walk through the entire demo from a clean setup and record the results.
 
 ## Phase 6 — Post-submission portfolio expansion
