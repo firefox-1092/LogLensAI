@@ -13,6 +13,26 @@ LogLens is a local web application for uploading `.log` or `.txt` files, explori
 - Ask dataset-scoped questions using Groq or OpenRouter. The backend retrieves bounded evidence and returns answer references. This is keyword-based retrieval, not guaranteed root-cause analysis.
 - Run the backend and frontend locally, or run all three services through Docker Compose. GitHub Actions runs backend tests and a frontend production build.
 
+## Application Screenshots
+
+### Analytics Dashboard
+
+The dataset overview brings together severity distribution, the activity timeline, and error-pattern analytics for the selected upload.
+
+![LogLens analytics dashboard](docs/screenshots/analytics-dashboard.png)
+
+### Top Error Patterns
+
+Similar error messages are grouped into normalized patterns. Each card shows its occurrence count, message variations, first and last timestamps, and source-line links. The example below has one occurrence, so it is not labeled as recurring.
+
+![LogLens top error patterns](docs/screenshots/recurring-errors.png)
+
+### Evidence-Grounded AI Assistant
+
+Ask questions about the selected dataset, inspect the cited log entries, and review observed facts separately from hypotheses.
+
+![LogLens evidence-grounded AI assistant](docs/screenshots/ai-log-assistant.png)
+
 ## Architecture
 
 ```mermaid
