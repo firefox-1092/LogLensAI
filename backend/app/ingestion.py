@@ -3,7 +3,7 @@
 from sqlalchemy.orm import Session
 
 from .models import LogEntry, UploadedDataset
-from .parser import parse_log_text
+from .parser import parse_json_text, parse_log_text
 
 
 class EmptyLogFileError(ValueError):
@@ -14,7 +14,12 @@ def persist_parsed_upload(
     db: Session, filename: str, raw_contents: bytes, text_contents: str
 ) -> UploadedDataset:
     """Save upload metadata and every non-empty parsed or unparsed line atomically."""
-    parsed_lines = parse_log_text(text_contents)
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    parsed_lines = (
+        parse_json_text(text_contents, document=suffix == "json")
+        if suffix in {"json", "jsonl", "ndjson"}
+        else parse_log_text(text_contents)
+    )
     if not parsed_lines:
         raise EmptyLogFileError("The file contains no non-empty log lines.")
 

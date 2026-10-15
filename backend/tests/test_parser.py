@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from backend.app.parser import parse_log_text
+from backend.app.parser import MAX_JSON_RECORDS, StructuredLogLimitError, parse_json_text, parse_log_text
 
 
 @pytest.mark.parametrize(
@@ -70,3 +70,62 @@ def test_empty_lines_are_skipped_without_shifting_source_line_numbers() -> None:
 
     assert len(entries) == 1
     assert entries[0].line_number == 2
+
+
+def test_jsonl_parses_common_aliases_preserves_raw_and_unicode():
+    contents = '{"@timestamp":"2026-10-11T10:00:00Z","log_level":"error","event":"café ☕"}\n'
+    result = parse_json_text(contents)
+    assert len(result) == 1
+    assert result[0].timestamp.isoformat() == "2026-10-11T10:00:00"
+    assert result[0].severity == "ERROR"
+    assert result[0].message == "café ☕"
+    assert result[0].raw_line == contents.rstrip("\n")
+    assert result[0].line_number == 1 and result[0].parsed is True
+
+
+def test_json_missing_fields_and_unknown_severity_are_not_invented():
+    result = parse_json_text('{"severity":"notice","payload":7}\n{"msg":"hello"}\n')
+    assert result[0].severity is None
+    assert result[0].timestamp is None
+    assert result[0].parsed is True
+    assert result[0].message == '{"severity":"notice","payload":7}'
+    assert result[1].message == "hello"
+    assert result[1].severity is None and result[1].timestamp is None
+    date_only = parse_json_text('{"timestamp":"2026-10-11","message":"date only"}')[0]
+    assert date_only.timestamp is None
+
+
+def test_json_document_array_preserves_starting_lines_and_order():
+    contents = '[\n  {"time":"2026-10-11 10:00:00","level":"warning","message":"first"},\n\n  {"timestamp":"2026-10-11T10:00:02","severity":"INFO","msg":"second"}\n]\n'
+    result = parse_json_text(contents, document=True)
+    assert [entry.line_number for entry in result] == [2, 4]
+    assert [entry.message for entry in result] == ["first", "second"]
+    assert result[0].severity == "WARN"
+    assert result[0].raw_line.startswith('{"time"')
+
+
+def test_compact_json_array_remains_one_unparsed_physical_record():
+    raw = '[{"message":"first"},{"message":"second"}]'
+    result = parse_json_text(raw, document=True)
+    assert len(result) == 1
+    assert result[0].parsed is False
+    assert result[0].line_number == 1
+    assert result[0].raw_line == raw
+
+
+def test_jsonl_keeps_malformed_lines_unparsed_and_in_order():
+    result = parse_json_text('{"message":"ok"}\nnot-json\n{"msg":"also ok"}\n')
+    assert [entry.line_number for entry in result] == [1, 2, 3]
+    assert [entry.parsed for entry in result] == [True, False, True]
+    assert result[1].raw_line == "not-json"
+
+
+def test_empty_json_and_malformed_document_are_handled_without_data_loss():
+    assert parse_json_text(" \n\t", document=True) == []
+    result = parse_json_text('{\n "message": "unterminated"', document=True)
+    assert result and all(not entry.parsed for entry in result)
+
+
+def test_structured_json_record_count_is_bounded():
+    with pytest.raises(StructuredLogLimitError):
+        parse_json_text('{"msg":"x"}\n' * (MAX_JSON_RECORDS + 1))

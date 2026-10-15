@@ -16,7 +16,18 @@ MAX_ERROR_PATTERNS = 10
 MAX_PATTERN_LINES = 10
 _UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b")
 _IP_CANDIDATE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
-_TIMESTAMP = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b", re.I)
+_IPV6_CANDIDATE = re.compile(
+    r"(?<![\w.:])(?=[0-9a-f:.]{2,45}:)[0-9a-f:.]{2,45}(?![\w.:])", re.I
+)
+_TIMESTAMP = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+    r"(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b",
+    re.I,
+)
+_REQUEST_ID = re.compile(
+    r"(?i)(?P<prefix>\b(?:x[-_ ]?request|request|correlation|trace)[-_ ]?id\b\s*[=:]\s*)"
+    r"(?P<value>[a-z0-9][a-z0-9._-]{5,})"
+)
 _SEVERITIES = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "CRITICAL")
 _ERROR_LEVELS = {"ERROR", "FATAL", "CRITICAL"}
 
@@ -24,6 +35,16 @@ _ERROR_LEVELS = {"ERROR", "FATAL", "CRITICAL"}
 def _replace_volatile_values(message: str, *, ip_placeholder: str = "<IP>") -> str:
     """Replace values already ignored by the grouping key, without changing other text."""
     normalized = _UUID.sub("<UUID>", message)
+
+    def replace_ipv6(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            ipaddress.IPv6Address(candidate)
+        except ipaddress.AddressValueError:
+            return candidate
+        return ip_placeholder
+
+    normalized = _IPV6_CANDIDATE.sub(replace_ipv6, normalized)
 
     def replace_ip(match: re.Match[str]) -> str:
         candidate = match.group(0)
@@ -34,7 +55,8 @@ def _replace_volatile_values(message: str, *, ip_placeholder: str = "<IP>") -> s
         return ip_placeholder
 
     normalized = _IP_CANDIDATE.sub(replace_ip, normalized)
-    return _TIMESTAMP.sub("<TIMESTAMP>", normalized)
+    normalized = _TIMESTAMP.sub("<TIMESTAMP>", normalized)
+    return _REQUEST_ID.sub(lambda match: f"{match.group('prefix')}<REQUEST_ID>", normalized)
 
 
 def normalize_error_message(message: str) -> str:
@@ -95,6 +117,7 @@ def build_dataset_analytics(db: Session, dataset_id) -> dict:
     timeline_counts: Counter[datetime] = Counter()
     timeline_error_counts: Counter[datetime] = Counter()
     timeline_warning_counts: Counter[datetime] = Counter()
+    timeline_severity_counts: dict[datetime, Counter[str]] = {}
     first_timestamp: datetime | None = None
     last_timestamp: datetime | None = None
     total_entries = parsed_entries = unparsed_entries = errors = warnings = 0
@@ -171,6 +194,8 @@ def build_dataset_analytics(db: Session, dataset_id) -> dict:
             bucket = _bucket_start(timestamp, bucket_unit, bucket_interval)
             timeline_counts[bucket] += 1
             normalized_severity = (severity or "").upper()
+            if normalized_severity:
+                timeline_severity_counts.setdefault(bucket, Counter())[normalized_severity] += 1
             if normalized_severity in _ERROR_LEVELS:
                 timeline_error_counts[bucket] += 1
             elif normalized_severity in {"WARN", "WARNING"}:
@@ -215,6 +240,7 @@ def build_dataset_analytics(db: Session, dataset_id) -> dict:
                     "entries": count,
                     "error_count": timeline_error_counts[bucket],
                     "warning_count": timeline_warning_counts[bucket],
+                    "severity_counts": dict(timeline_severity_counts.get(bucket, {})),
                 }
                 for bucket, count in sorted(timeline_counts.items())
             ],

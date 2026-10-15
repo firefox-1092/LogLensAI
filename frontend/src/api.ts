@@ -59,7 +59,7 @@ export type DatasetAnalytics = {
   timeline: {
     bucket_unit: 'minute' | 'hour' | 'day' | 'week' | 'none';
     bucket_interval: number;
-    buckets: Array<{ timestamp: string; entries: number; error_count: number; warning_count: number }>;
+    buckets: Array<{ timestamp: string; entries: number; error_count: number; warning_count: number; severity_counts: Record<string, number> }>;
   };
 };
 
@@ -85,6 +85,19 @@ export type AIChatHistoryTurn = {
   answer: string;
 };
 
+export type InvestigationNode = {
+  id: string; kind: 'observed_error' | 'evidence' | 'investigation_step' | 'diagnostic_branch' | 'verification' | 'conclusion';
+  status: 'observed' | 'suggested' | 'unverified'; title: string; description: string; evidence_lines: number[]; source_refs: string[];
+};
+export type InvestigationWorkflow = {
+  title: string; summary: string; status: 'ready_for_review'; pattern_fingerprint: string; nodes: InvestigationNode[];
+  edges: Array<{ source: string; target: string; label: string }>;
+  verification_steps: string[]; limitations: string[]; source_context_used: boolean;
+  evidence: EvidenceReference[];
+  source_evidence: Array<{ reference: string; file_path: string; chunk_index: number; content: string }>;
+};
+export type SourceContextSummary = { files: number; chunks: number };
+
 async function readResponse<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -109,13 +122,15 @@ export async function uploadLogFile(file: File): Promise<UploadSummary> {
 
 export async function fetchEntries(
   uploadId: string,
-  options: { page: number; pageSize: number; severity: string; query: string; lineNumber?: number | null },
+  options: { page: number; pageSize: number; severity: string; query: string; lineNumber?: number | null; timestampFrom?: string | null; timestampTo?: string | null },
   signal?: AbortSignal,
 ): Promise<PaginatedEntries> {
   const params = new URLSearchParams({ page: String(options.page), page_size: String(options.pageSize) });
   if (options.severity) params.set('severity', options.severity);
   if (options.query) params.set('q', options.query);
   if (options.lineNumber) params.set('line_number', String(options.lineNumber));
+  if (options.timestampFrom) params.set('timestamp_from', options.timestampFrom);
+  if (options.timestampTo) params.set('timestamp_to', options.timestampTo);
   const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/entries?${params}`, { signal });
   return readResponse<PaginatedEntries>(response);
 }
@@ -136,4 +151,28 @@ export async function askDatasetQuestion(
     body: JSON.stringify({ question, history: history.slice(-4) }),
   });
   return readResponse<AIChatResponse>(response);
+}
+
+export async function investigateErrorPattern(uploadId: string, fingerprint: string, includeSourceContext = false): Promise<InvestigationWorkflow> {
+  const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/ai/investigations`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pattern_fingerprint: fingerprint, include_source_context: includeSourceContext }),
+  });
+  return readResponse<InvestigationWorkflow>(response);
+}
+
+export async function uploadSourceContext(uploadId: string, file: File): Promise<SourceContextSummary> {
+  const form = new FormData(); form.append('file', file);
+  const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/source-context`, { method: 'PUT', body: form });
+  return readResponse<SourceContextSummary>(response);
+}
+
+export async function fetchSourceContextStatus(uploadId: string): Promise<SourceContextSummary> {
+  const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/source-context`);
+  return readResponse<SourceContextSummary>(response);
+}
+
+export async function deleteSourceContext(uploadId: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/uploads/${uploadId}/source-context`, { method: 'DELETE' });
+  if (!response.ok) await readResponse<never>(response);
 }

@@ -84,6 +84,61 @@ def test_entry_pagination_severity_and_keyword_filters(client: TestClient) -> No
     assert source_line.json()["total"] == 1
     assert source_line.json()["items"][0]["line_number"] == 3
 
+    time_slice = client.get(
+        f"/api/uploads/{upload_id}/entries?timestamp_from=2026-10-11T10:01:00Z"
+        "&timestamp_to=2026-10-11T10:02:00Z"
+    )
+    assert time_slice.status_code == 200
+    assert [item["line_number"] for item in time_slice.json()["items"]] == [3, 4]
+    invalid_range = client.get(
+        f"/api/uploads/{upload_id}/entries?timestamp_from=2026-10-11T10:02:00"
+        "&timestamp_to=2026-10-11T10:01:00"
+    )
+    assert invalid_range.status_code == 422
+
+
+def test_jsonl_upload_persists_records_and_analytics(client: TestClient) -> None:
+    contents = (
+        b'{"timestamp":"2026-10-11T10:00:00","level":"error","message":"Cache miss"}\n'
+        b'not valid json\n'
+        b'{"time":"2026-10-11T10:00:05","severity":"warning","msg":"Retrying"}\n'
+    )
+    uploaded = client.post(
+        "/api/uploads", files={"file": ("events.jsonl", contents, "application/jsonl")}
+    )
+    assert uploaded.status_code == 201
+    summary = uploaded.json()
+    assert (summary["total_entries"], summary["parsed_entries"], summary["unparsed_entries"]) == (3, 2, 1)
+    dataset_id = summary["id"]
+    entries = client.get(f"/api/uploads/{dataset_id}/entries").json()["items"]
+    assert [entry["line_number"] for entry in entries] == [1, 2, 3]
+    assert entries[0]["severity"] == "ERROR" and entries[0]["message"] == "Cache miss"
+    assert entries[0]["raw_line"] == contents.decode().splitlines()[0]
+    assert entries[1]["parsed"] is False and entries[1]["raw_line"] == "not valid json"
+    analytics = client.get(f"/api/uploads/{dataset_id}/analytics").json()
+    assert analytics["error_count"] == 1 and analytics["warning_count"] == 1
+
+
+def test_json_array_upload_preserves_entry_source_lines(client: TestClient) -> None:
+    contents = b'[\n  {"timestamp":"2026-10-11T10:00:00","severity":"ERROR","message":"Array error"}\n]\n'
+    uploaded = client.post("/api/uploads", files={"file": ("events.json", contents, "application/json")})
+    assert uploaded.status_code == 201
+    entry = client.get(f"/api/uploads/{uploaded.json()['id']}/entries").json()["items"][0]
+    assert entry["line_number"] == 2
+    assert entry["message"] == "Array error"
+    assert entry["raw_line"] == '{"timestamp":"2026-10-11T10:00:00","severity":"ERROR","message":"Array error"}'
+
+
+def test_compact_json_array_is_retained_without_fabricating_line_numbers(client: TestClient) -> None:
+    raw = b'[{"message":"first"},{"message":"second"}]'
+    uploaded = client.post("/api/uploads", files={"file": ("compact.json", raw, "application/json")})
+    assert uploaded.status_code == 201
+    entries = client.get(f"/api/uploads/{uploaded.json()['id']}/entries").json()["items"]
+    assert len(entries) == 1
+    assert entries[0]["line_number"] == 1
+    assert entries[0]["parsed"] is False
+    assert entries[0]["raw_line"] == raw.decode()
+
 
 @pytest.mark.parametrize(
     ("filename", "content", "limit", "expected_status"),

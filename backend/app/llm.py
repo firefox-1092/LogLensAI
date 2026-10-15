@@ -13,9 +13,18 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 class LLMConfigurationError(Exception):
     """The selected provider or its credentials are not configured."""
 
+    def __init__(self, message: str = "configuration_error", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class LLMProviderError(Exception):
-    """A provider request failed for a reason safe to expose generically."""
+    """Provider failure with safe, non-secret diagnostic metadata."""
+
+    def __init__(self, diagnostic: str = "provider_error", status_code: int | None = None):
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+        self.status_code = status_code
 
 
 class LLMRateLimitError(LLMProviderError):
@@ -90,10 +99,10 @@ def _normalize_completion(payload: Any) -> LLMCompletion:
             content = getattr(getattr(choice, "message", None), "content", None)
         usage = payload.get("usage") if isinstance(payload, dict) else getattr(payload, "usage", None)
     except (AttributeError, IndexError, KeyError, TypeError):
-        raise LLMProviderError from None
+        raise LLMProviderError("invalid_provider_response") from None
 
     if not isinstance(content, str) or not content.strip():
-        raise LLMProviderError
+        raise LLMProviderError("empty_provider_response")
     reason = finish_reason.strip().lower() if isinstance(finish_reason, str) else None
     if reason in {"length", "max_tokens", "max_output_tokens", "token_limit"}:
         status = "incomplete"
@@ -102,7 +111,7 @@ def _normalize_completion(payload: Any) -> LLMCompletion:
     elif reason is None or reason not in {"tool_calls", "content_filter", "error", "cancelled"}:
         status = "unknown"
     else:
-        raise LLMProviderError
+        raise LLMProviderError("unsupported_finish_reason")
     prompt_tokens, completion_tokens, total_tokens = _usage_values(usage)
     return LLMCompletion(
         content=content.strip(),
@@ -118,28 +127,29 @@ def _groq_completion(configuration: LLMConfiguration, messages: list[dict[str, s
     try:
         from groq import APIConnectionError, APITimeoutError, APIStatusError, Groq, RateLimitError
     except ImportError:
-        raise LLMProviderError from None
+        raise LLMProviderError("provider_sdk_unavailable") from None
 
     try:
         client = Groq(api_key=configuration.api_key, timeout=25.0, max_retries=0)
         return client.chat.completions.create(
             model=configuration.model,
             messages=messages,
-            max_completion_tokens=1200,
+            max_completion_tokens=2000,
             temperature=0.2,
         )
     except APITimeoutError:
         raise LLMTimeoutError from None
     except RateLimitError:
-        raise LLMRateLimitError from None
+        raise LLMRateLimitError("upstream_rate_limited", 429) from None
     except APIStatusError as exc:
         if exc.status_code in {401, 403}:
-            raise LLMConfigurationError from None
-        raise LLMProviderError from None
+            raise LLMConfigurationError("provider_authentication_rejected", exc.status_code) from None
+        category = "model_unavailable" if exc.status_code == 404 else "upstream_unavailable" if exc.status_code == 503 else "upstream_http_error"
+        raise LLMProviderError(category, exc.status_code) from None
     except APIConnectionError:
-        raise LLMProviderError from None
+        raise LLMProviderError("provider_connection_error") from None
     except Exception:
-        raise LLMProviderError from None
+        raise LLMProviderError("provider_request_error") from None
 
 
 def _openrouter_completion(configuration: LLMConfiguration, messages: list[dict[str, str]]) -> Any:
@@ -156,24 +166,25 @@ def _openrouter_completion(configuration: LLMConfiguration, messages: list[dict[
                 "Content-Type": "application/json",
                 "X-Title": "LogLens",
             },
-            json={"model": configuration.model, "messages": messages, "max_tokens": 1200, "temperature": 0.2},
+            json={"model": configuration.model, "messages": messages, "max_tokens": 2000, "temperature": 0.2},
             timeout=25.0,
         )
     except httpx.TimeoutException:
         raise LLMTimeoutError from None
     except httpx.RequestError:
-        raise LLMProviderError from None
+        raise LLMProviderError("provider_connection_error") from None
 
     if response.status_code == 429:
-        raise LLMRateLimitError
+        raise LLMRateLimitError("upstream_rate_limited", response.status_code)
     if response.status_code in {401, 403}:
-        raise LLMConfigurationError from None
+        raise LLMConfigurationError("provider_authentication_rejected", response.status_code) from None
     if response.status_code >= 400:
-        raise LLMProviderError from None
+        category = "model_unavailable" if response.status_code == 404 else "upstream_unavailable" if response.status_code == 503 else "upstream_http_error"
+        raise LLMProviderError(category, response.status_code) from None
     try:
         return response.json()
     except ValueError:
-        raise LLMProviderError from None
+        raise LLMProviderError("invalid_provider_json") from None
 
 
 def complete_chat(messages: list[dict[str, str]]) -> LLMCompletion:
@@ -189,10 +200,16 @@ def complete_chat(messages: list[dict[str, str]]) -> LLMCompletion:
         completion = _normalize_completion(raw)
     except (LLMConfigurationError, LLMProviderError) as exc:
         logger.warning(
-            "LLM request failed provider=%s model=%s error_type=%s duration_ms=%d",
+            "LLM request failed provider=%s model=%s error_type=%s diagnostic=%s upstream_status=%s duration_ms=%d",
             configuration.provider,
             configuration.model,
             type(exc).__name__,
+            (
+                "timeout" if isinstance(exc, LLMTimeoutError)
+                else exc.diagnostic if isinstance(exc, LLMProviderError)
+                else "configuration_error"
+            ),
+            exc.status_code if isinstance(exc, (LLMProviderError, LLMConfigurationError)) and exc.status_code else "unavailable",
             int((time.monotonic() - started) * 1000),
         )
         raise

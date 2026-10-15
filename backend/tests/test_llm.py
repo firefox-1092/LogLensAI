@@ -148,6 +148,48 @@ def test_openrouter_rate_limit_is_normalized(monkeypatch: pytest.MonkeyPatch) ->
         complete_chat([{"role": "user", "content": "Question"}])
 
 
+@pytest.mark.parametrize(("status_code", "diagnostic"), [(404, "model_unavailable"), (503, "upstream_unavailable"), (502, "upstream_http_error")])
+def test_openrouter_http_failure_logs_safe_status_and_category(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status_code: int,
+    diagnostic: str,
+) -> None:
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: SimpleNamespace(status_code=status_code))
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "never-log-this-test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "selected/router-model")
+    caplog.set_level("WARNING")
+
+    with pytest.raises(LLMProviderError) as raised:
+        complete_chat([{"role": "user", "content": "private prompt evidence"}])
+
+    assert raised.value.status_code == status_code
+    assert diagnostic in caplog.text
+    assert f"upstream_status={status_code}" in caplog.text
+    assert "never-log-this-test-key" not in caplog.text
+    assert "private prompt evidence" not in caplog.text
+
+
+def test_openrouter_request_token_budget_is_suitable_for_bounded_workflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    captured = {}
+    monkeypatch.setattr(httpx, "post", lambda _url, **kwargs: (captured.update(kwargs) or SimpleNamespace(
+        status_code=200,
+        json=lambda: {"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]},
+    )))
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "selected/router-model")
+
+    complete_chat([{"role": "user", "content": "workflow"}])
+
+    assert captured["json"]["max_tokens"] == 2000
+
+
 @pytest.mark.parametrize(
     ("status_code", "error"),
     [(401, LLMConfigurationError), (503, LLMProviderError)],

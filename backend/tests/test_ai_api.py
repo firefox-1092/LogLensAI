@@ -391,3 +391,23 @@ def test_evidence_count_and_message_size_are_bounded(
     assert all(len(item["message"]) <= 1200 for item in response.json()["evidence"])
     assert len(json.dumps(captured["evidence"], ensure_ascii=True)) <= 16000
     assert "RETRIEVED SUBSET" in captured["scope"]
+
+
+def test_ai_retrieval_can_use_structured_json_upload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.post(
+        "/api/uploads",
+        files={"file": ("structured.ndjson", b'{"@timestamp":"2026-10-11T10:00:00Z","level":"ERROR","message":"Database connection timeout"}\n', "application/x-ndjson")},
+    )
+    assert response.status_code == 201
+    upload_id = response.json()["id"]
+    captured = {}
+    def fake_completion(_question, evidence, _history, _scope):
+        captured["evidence"] = evidence
+        return completed("Line 1 records a database connection timeout.")
+    monkeypatch.setattr("backend.app.ai._request_llm_completion", fake_completion)
+
+    result = ask(client, upload_id, "What database event was recorded?")
+
+    assert result.status_code == 200
+    assert captured["evidence"][0]["line_number"] == 1
+    assert captured["evidence"][0]["message"] == "Database connection timeout"

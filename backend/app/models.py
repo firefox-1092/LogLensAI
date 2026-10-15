@@ -48,3 +48,21 @@ class LogEntry(Base):
     raw_line: Mapped[str] = mapped_column(Text, nullable=False)
     parsed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     dataset: Mapped[UploadedDataset] = relationship(back_populates="entries")
+
+
+class SourceContextChunk(Base):
+    """A bounded, redacted code chunk explicitly uploaded for one dataset."""
+
+    __tablename__ = "source_context_chunks"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "file_path", "chunk_index", name="uq_source_context_chunk"),
+        Index("ix_source_context_dataset", "dataset_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("uploads.id", ondelete="CASCADE"), nullable=False
+    )
+    file_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)

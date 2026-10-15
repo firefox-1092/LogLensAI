@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { askDatasetQuestion, checkHealth, fetchDatasetAnalytics, fetchEntries, uploadLogFile } from './api';
-import type { AIChatResponse, DatasetAnalytics, EvidenceReference, LogEntry, PaginatedEntries, UploadSummary } from './api';
+import { askDatasetQuestion, checkHealth, deleteSourceContext, fetchDatasetAnalytics, fetchEntries, fetchSourceContextStatus, investigateErrorPattern, uploadLogFile, uploadSourceContext } from './api';
+import type { AIChatResponse, DatasetAnalytics, EvidenceReference, InvestigationWorkflow, LogEntry, PaginatedEntries, SourceContextSummary, UploadSummary } from './api';
 import { parseAssistantMarkdown } from './markdown.mjs';
 import type { InlineToken } from './markdown.mjs';
 import { getCitedLineSegments, getTimelineBarHeight, selectTimelineLabelIndices } from './presentation.mjs';
 
 type ConnectionState = 'loading' | 'connected' | 'error';
 const PAGE_SIZE = 25;
+const SEVERITY_LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL', 'CRITICAL'] as const;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -96,6 +97,7 @@ export default function App() {
   const [analyticsAttempt, setAnalyticsAttempt] = useState(0);
   const [page, setPage] = useState(1);
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [timeRange, setTimeRange] = useState<{ from: string; to: string; label: string } | null>(null);
   const [severity, setSeverity] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -103,6 +105,16 @@ export default function App() {
   const [assistantLoading, setAssistantLoading] = useState(false);
   const [assistantError, setAssistantError] = useState('');
   const [assistantTurns, setAssistantTurns] = useState<Array<{ question: string; result: AIChatResponse }>>([]);
+  const [workflow, setWorkflow] = useState<InvestigationWorkflow | null>(null);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState('');
+  const [selectedWorkflowNode, setSelectedWorkflowNode] = useState<string | null>(null);
+  const [workflowFingerprint, setWorkflowFingerprint] = useState('');
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [sourceContext, setSourceContext] = useState<SourceContextSummary>({ files: 0, chunks: 0 });
+  const [sourceContextBusy, setSourceContextBusy] = useState(false);
+  const [sourceContextError, setSourceContextError] = useState('');
+  const [useSourceContext, setUseSourceContext] = useState(false);
   const assistantRequestToken = useRef(0);
   const activeDatasetId = useRef<string | null>(null);
   activeDatasetId.current = dataset?.id ?? null;
@@ -128,7 +140,7 @@ export default function App() {
     const controller = new AbortController();
     setEntriesLoading(true);
     setEntriesError('');
-    void fetchEntries(dataset.id, { page, pageSize: PAGE_SIZE, severity, query: searchTerm, lineNumber: selectedLine }, controller.signal)
+    void fetchEntries(dataset.id, { page, pageSize: PAGE_SIZE, severity, query: searchTerm, lineNumber: selectedLine, timestampFrom: timeRange?.from, timestampTo: timeRange?.to }, controller.signal)
       .then(setEntries)
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
@@ -139,7 +151,7 @@ export default function App() {
         if (!controller.signal.aborted) setEntriesLoading(false);
       });
     return () => controller.abort();
-  }, [dataset, page, searchTerm, selectedLine, severity]);
+  }, [dataset, page, searchTerm, selectedLine, severity, timeRange]);
 
   useEffect(() => {
     if (!dataset) return;
@@ -161,6 +173,13 @@ export default function App() {
     return () => controller.abort();
   }, [dataset, analyticsAttempt]);
 
+  useEffect(() => {
+    if (!dataset) { setSourceContext({ files: 0, chunks: 0 }); return; }
+    let current = true;
+    void fetchSourceContextStatus(dataset.id).then((status) => { if (current) setSourceContext(status); }).catch(() => { if (current) setSourceContext({ files: 0, chunks: 0 }); });
+    return () => { current = false; };
+  }, [dataset]);
+
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedFile) return;
@@ -176,7 +195,13 @@ export default function App() {
       setSearchTerm('');
       setPage(1);
       setSelectedLine(null);
+      setTimeRange(null);
       setAssistantTurns([]);
+      setWorkflow(null);
+      setWorkflowError('');
+      setUseSourceContext(false);
+      setSourceFile(null);
+      setWorkflowLoading(false);
       setAssistantError('');
       setAssistantLoading(false);
       setAnalytics(null);
@@ -226,11 +251,60 @@ export default function App() {
     setSearchInput('');
     setSearchTerm('');
     setSeverity('');
+    setTimeRange(null);
+    document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function investigatePattern(fingerprint: string) {
+    if (!dataset) return;
+    setWorkflowLoading(true);
+    setWorkflowFingerprint(fingerprint);
+    setWorkflowError('');
+    setWorkflow(null);
+    setSelectedWorkflowNode(null);
+    try {
+      const result = await investigateErrorPattern(dataset.id, fingerprint, useSourceContext);
+      if (activeDatasetId.current === dataset.id) setWorkflow(result);
+    } catch (error) {
+      if (activeDatasetId.current === dataset.id) setWorkflowError(error instanceof Error ? error.message : 'Could not create the investigation workflow.');
+    } finally {
+      if (activeDatasetId.current === dataset.id) setWorkflowLoading(false);
+    }
+  }
+
+  async function handleSourceUpload() {
+    if (!dataset || !sourceFile) return;
+    setSourceContextBusy(true); setSourceContextError('');
+    try { const status = await uploadSourceContext(dataset.id, sourceFile); if (activeDatasetId.current === dataset.id) { setSourceContext(status); setSourceFile(null); } }
+    catch (error) { if (activeDatasetId.current === dataset.id) setSourceContextError(error instanceof Error ? error.message : 'Could not index this source archive.'); }
+    finally { if (activeDatasetId.current === dataset.id) setSourceContextBusy(false); }
+  }
+
+  async function handleSourceDelete() {
+    if (!dataset) return;
+    setSourceContextBusy(true); setSourceContextError('');
+    try { await deleteSourceContext(dataset.id); if (activeDatasetId.current === dataset.id) { setSourceContext({ files: 0, chunks: 0 }); setUseSourceContext(false); } }
+    catch (error) { if (activeDatasetId.current === dataset.id) setSourceContextError(error instanceof Error ? error.message : 'Could not remove source context.'); }
+    finally { if (activeDatasetId.current === dataset.id) setSourceContextBusy(false); }
+  }
+
+  function focusTimelineBucket(timestamp: string, unit: DatasetAnalytics['timeline']['bucket_unit'], interval: number) {
+    const start = new Date(timestamp.endsWith('Z') ? timestamp : `${timestamp}Z`);
+    const duration = unit === 'minute' ? 60_000 : unit === 'hour' ? 3_600_000 : unit === 'day' ? 86_400_000 : 604_800_000;
+    const from = start.toISOString();
+    const to = new Date(start.getTime() + duration * interval).toISOString();
+    setTimeRange({ from, to, label: formatTimestamp(timestamp) });
+    setSelectedLine(null);
+    setPage(1);
+    setSearchTerm('');
+    setSearchInput('');
     document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   const timelineBuckets = analytics?.timeline.buckets ?? [];
   const timelineMaximum = Math.max(...timelineBuckets.map((bucket) => bucket.entries), 0);
+  const severityTimelineMaximum = Math.max(...timelineBuckets.map((bucket) => bucket.error_count + bucket.warning_count), 0);
+  const allSeverityTimelineMaximum = Math.max(...timelineBuckets.map((bucket) => Object.values(bucket.severity_counts).reduce((sum, count) => sum + count, 0)), 0);
   const timestampedEventCount = timelineBuckets.reduce((total, bucket) => total + bucket.entries, 0);
   const timelineLabelIndices = selectTimelineLabelIndices(timelineBuckets.length);
   const timelinePlotMinWidth = timelineBuckets.length > 32
@@ -246,6 +320,9 @@ export default function App() {
         </a>
         <span className="phase-label">LOCAL PREVIEW <i /></span>
       </header>
+      <nav className="workspace-nav" aria-label="Workspace sections">
+        <a href="#home">Overview</a><a href="#log-explorer">Log Explorer</a><a href="#analytics">Analytics</a><a href="#ai-investigator">AI Investigator</a>
+      </nav>
 
       <section className="hero" id="home">
         <div className="eyebrow"><span className="eyebrow-line" /> APPLICATION LOG INTELLIGENCE</div>
@@ -277,10 +354,10 @@ export default function App() {
         <form className="upload-panel" onSubmit={handleUpload}>
           <label className="file-picker">
             <span className="file-picker-icon" aria-hidden="true">↑</span>
-            <span><strong>Choose a log file</strong><small>Supported formats: .log and .txt</small></span>
+            <span><strong>Choose a log file</strong><small>Supported formats: .log, .txt, .json, .jsonl, and .ndjson</small></span>
             <input
               type="file"
-              accept=".log,.txt,text/plain"
+              accept=".log,.txt,.json,.jsonl,.ndjson,text/plain,application/json"
               onChange={(event) => {
                 setSelectedFile(event.target.files?.[0] ?? null);
                 setUploadError('');
@@ -310,7 +387,7 @@ export default function App() {
               <div className="metric muted"><strong>{dataset.unparsed_entries}</strong><small>UNPARSED</small></div>
             </div>
 
-            <section className="analytics-panel" aria-label="Dataset analytics" aria-busy={analyticsLoading}>
+            <section className="analytics-panel" id="analytics" aria-label="Dataset analytics" aria-busy={analyticsLoading}>
               <div className="section-heading analytics-heading">
                 <div><div className="eyebrow"><span className="eyebrow-line" /> DETERMINISTIC ANALYTICS</div><h2>Dataset overview</h2></div>
                 <span className="local-note">Counts and patterns are computed from this dataset</span>
@@ -352,16 +429,16 @@ export default function App() {
                               {timelineBuckets.map((bucket) => {
                                 const timestamp = formatTimestamp(bucket.timestamp);
                                 const interval = `${analytics.timeline.bucket_interval > 1 ? `${analytics.timeline.bucket_interval} ` : ''}${analytics.timeline.bucket_unit}`;
-                                return <div
+                                return <button
+                                  type="button"
                                   className="timeline-column"
-                                  role="img"
-                                  tabIndex={0}
                                   key={bucket.timestamp}
                                   title={`${timestamp} · ${bucket.entries} events · ${bucket.error_count} errors · ${bucket.warning_count} warnings`}
                                   aria-label={`${timestamp}, ${bucket.entries} events, ${bucket.error_count} errors, and ${bucket.warning_count} warnings in this ${interval} bucket`}
+                                  onClick={() => focusTimelineBucket(bucket.timestamp, analytics.timeline.bucket_unit, analytics.timeline.bucket_interval)}
                                 >
                                   <span className="timeline-bar" style={{ height: `${getTimelineBarHeight(bucket.entries, timelineMaximum)}%` }} />
-                                </div>;
+                                </button>;
                               })}
                             </div>
                             <div className="timeline-axis" aria-hidden="true">
@@ -379,6 +456,22 @@ export default function App() {
                             </div>
                           </div>
                         </div>
+                        <div className="severity-timeline-heading"><strong>Error and warning activity</strong><span><i className="legend-error" /> Errors <i className="legend-warning" /> Warnings</span></div>
+                        <div className="timeline-viewport" role="region" aria-label="Scrollable error and warning activity timeline">
+                          <div className="timeline-chart severity-timeline" role="group" aria-label="Errors and warnings by time bucket" style={{ gridTemplateColumns: `repeat(${timelineBuckets.length}, minmax(3px, 1fr))`, minWidth: timelinePlotMinWidth ? `${timelinePlotMinWidth}px` : undefined }}>
+                            {timelineBuckets.map((bucket) => <button type="button" className="severity-timeline-column" key={bucket.timestamp} title={`${formatTimestamp(bucket.timestamp)} · ${bucket.error_count} errors · ${bucket.warning_count} warnings`} aria-label={`Filter log entries to ${formatTimestamp(bucket.timestamp)} with ${bucket.error_count} errors and ${bucket.warning_count} warnings`} onClick={() => focusTimelineBucket(bucket.timestamp, analytics.timeline.bucket_unit, analytics.timeline.bucket_interval)}>
+                              <span className="severity-stack"><i className="legend-error" style={{ height: `${severityTimelineMaximum ? (bucket.error_count / severityTimelineMaximum) * 100 : 0}%` }} /><i className="legend-warning" style={{ height: `${severityTimelineMaximum ? (bucket.warning_count / severityTimelineMaximum) * 100 : 0}%` }} /></span>
+                            </button>)}
+                          </div>
+                        </div>
+                        <div className="all-severity-heading"><strong>Severity trends</strong><span>{SEVERITY_LEVELS.map((level) => <span key={level}><i className={`legend-${level.toLowerCase()}`} />{level}</span>)}</span></div>
+                        <div className="timeline-viewport" role="region" aria-label="Scrollable severity trends">
+                          <div className="timeline-chart severity-timeline" role="group" aria-label="Severity counts by time bucket" style={{ gridTemplateColumns: `repeat(${timelineBuckets.length}, minmax(3px, 1fr))`, minWidth: timelinePlotMinWidth ? `${timelinePlotMinWidth}px` : undefined }}>
+                            {timelineBuckets.map((bucket) => <button type="button" className="severity-timeline-column" key={bucket.timestamp} title={`${formatTimestamp(bucket.timestamp)} · ${SEVERITY_LEVELS.map((level) => `${bucket.severity_counts[level] ?? 0} ${level}`).join(' · ')}`} aria-label={`Filter entries for ${formatTimestamp(bucket.timestamp)} by severity activity`} onClick={() => focusTimelineBucket(bucket.timestamp, analytics.timeline.bucket_unit, analytics.timeline.bucket_interval)}>
+                              <span className="severity-stack">{SEVERITY_LEVELS.map((level) => <i key={level} className={`legend-${level.toLowerCase()}`} style={{ height: `${allSeverityTimelineMaximum ? ((bucket.severity_counts[level] ?? 0) / allSeverityTimelineMaximum) * 100 : 0}%` }} />)}</span>
+                            </button>)}
+                          </div>
+                        </div>
                         <p className="sr-only">The chart contains {timestampedEventCount} timestamped events in {timelineBuckets.length} buckets. Dataset totals: {analytics.error_count} errors and {analytics.warning_count} warnings.</p>
                       </> : <p className="analytics-empty">{analytics.total_entries === 0
                         ? 'This dataset has no entries to plot.'
@@ -386,7 +479,7 @@ export default function App() {
                     </section>
                   </div>
                   <section className="analytics-card patterns-card">
-                    <div className="pattern-heading"><div><h3>Top Error Patterns</h3><p>Messages are grouped by severity after case, whitespace, timestamp, UUID, and valid IPv4 normalization. Numeric values such as status codes remain distinct.</p></div><span>TOP {analytics.error_patterns.length} / {analytics.unique_error_patterns}</span></div>
+                    <div className="pattern-heading"><div><h3>Top Error Patterns</h3><p>Messages are grouped by severity after case, whitespace, timestamp, UUID, valid IPv4/IPv6, and labeled request ID normalization. Meaningful numbers such as status codes remain distinct.</p></div><span>TOP {analytics.error_patterns.length} / {analytics.unique_error_patterns}</span></div>
                     {analytics.error_patterns.length ? <div className="pattern-list">{analytics.error_patterns.map((pattern) => (
                       <article className="pattern-row" key={pattern.fingerprint}>
                         <div className="pattern-card-heading">
@@ -411,17 +504,51 @@ export default function App() {
                             onClick={() => focusLogLine(lineNumber)}
                           >{lineNumber}</button>)}
                         </div>
+                        <button type="button" className="investigate-pattern-button" disabled={workflowLoading} onClick={() => void investigatePattern(pattern.fingerprint)}>
+                          {workflowLoading ? 'Building workflow…' : 'Investigate this error'}
+                        </button>
                       </article>
                     ))}</div> : <p className="analytics-empty">No error patterns were found in this dataset. ERROR, FATAL, and CRITICAL entries will appear here.</p>}
                   </section>
+                  {(workflowLoading || workflowError || workflow) && <section className="workflow-panel" aria-label="AI troubleshooting workflow" aria-busy={workflowLoading}>
+                    <div className="workflow-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> AI INVESTIGATION</div><h3>{workflow?.title ?? 'Troubleshooting workflow'}</h3></div>{workflow && <span className="workflow-safety">Suggested steps · root cause unconfirmed</span>}</div>
+                    {workflowLoading && <p className="assistant-status" role="status"><span className="spinner" /> Reviewing selected error and nearby log evidence…</p>}
+                    {workflowError && <p className="form-error" role="alert">{workflowError} <button type="button" onClick={() => workflowFingerprint && void investigatePattern(workflowFingerprint)}>Retry</button></p>}
+                    {workflow && <><p className="workflow-summary">{workflow.summary}</p>{workflow.source_context_used && <p className="workflow-caution">Relevant source snippets were included by your request. Code evidence does not establish runtime behavior.</p>}<div className="workflow-graph" role="list" aria-label="Investigation steps">
+                      {workflow.nodes.map((node) => <div className="workflow-node-wrap" key={node.id}>
+                        <div className={`workflow-node ${selectedWorkflowNode === node.id ? 'selected' : ''}`} role="listitem">
+                          <button type="button" className="workflow-node-toggle" onClick={() => setSelectedWorkflowNode(selectedWorkflowNode === node.id ? null : node.id)} aria-expanded={selectedWorkflowNode === node.id}>
+                            <span className={`workflow-status ${node.status}`}>{node.status.replace('_', ' ')}</span><strong>{node.title}</strong><small>{node.kind.replaceAll('_', ' ')}</small>
+                          </button>
+                          {selectedWorkflowNode === node.id && <div className="workflow-description">{node.description}{node.evidence_lines.length > 0 && <div className="workflow-lines">Log evidence: {node.evidence_lines.map((line) => <span key={line}><button type="button" className="line-link" onClick={() => focusLogLine(line)}>Line {line}</button>{' '}</span>)}</div>}{node.source_refs.length > 0 && <div className="workflow-lines">Source evidence: {node.source_refs.map((reference) => <span key={reference}><a href={`#source-${reference}`}>{workflow.source_evidence.find((item) => item.reference === reference)?.file_path ?? reference}</a>{' '}</span>)}</div>}</div>}
+                        </div>
+                        {workflow.edges.filter((edge) => edge.source === node.id).map((edge) => <button type="button" className="workflow-edge" key={`${edge.source}-${edge.target}`} onClick={() => setSelectedWorkflowNode(edge.target)} aria-label={`Follow ${edge.label || 'workflow edge'} to ${workflow.nodes.find((target) => target.id === edge.target)?.title ?? edge.target}`}>
+                          <span aria-hidden="true">→</span> {edge.label || 'Continue to'} <span aria-hidden="true">→</span> {workflow.nodes.find((target) => target.id === edge.target)?.title ?? edge.target}
+                        </button>)}
+                      </div>)}
+                    </div><p className="workflow-caution">Recommendations are investigation ideas, not confirmed causes. Verify them against the application and infrastructure.</p>
+                    {workflow.limitations.length > 0 && <ul className="workflow-limitations">{workflow.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+                    {workflow.evidence.length > 0 && <div className="evidence-list"><strong>Validated log evidence</strong>{workflow.evidence.map((item) => <div className="evidence-item" key={item.id}><span><button type="button" className="line-link" onClick={() => focusLogLine(item.line_number)}>Line {item.line_number}</button>{item.severity ? ` · ${item.severity}` : ''}</span><p>{item.parsed ? item.message : item.raw_line ?? item.message}</p>{!item.parsed && <small>Unparsed original text; structured fields are unavailable.</small>}</div>)}</div>}
+                    {workflow.source_evidence.length > 0 && <div className="evidence-list source-evidence"><strong>Source-code evidence · code observations do not prove runtime behavior</strong>{workflow.source_evidence.map((item) => <div className="evidence-item" id={`source-${item.reference}`} key={item.reference}><span>{item.reference} · {item.file_path} · chunk {item.chunk_index + 1}</span><pre>{item.content}</pre></div>)}</div>}
+                    {workflow.verification_steps.length > 0 && <div className="workflow-verifications"><strong>Verification steps</strong><ol>{workflow.verification_steps.map((step, index) => <li key={index}>{step}</li>)}</ol></div>}
+                    </>}
+                  </section>}
                 </>
               ) : null}
             </section>
 
-            <section className="assistant-panel" aria-label="AI log assistant">
+            <section className="assistant-panel" id="ai-investigator" aria-label="AI log assistant">
               <div className="assistant-heading">
                 <div><div className="eyebrow"><span className="eyebrow-line" /> AI ASSISTANT</div><h2>Ask about these logs</h2></div>
                 <span className="assistant-note">Answers cite retrieved log lines</span>
+              </div>
+              <div className="source-context-controls">
+                <div><strong>Optional source context</strong><p>Upload a ZIP containing source code you are authorized to share. LogLens indexes selected source files locally and never executes uploaded code.</p></div>
+                <input aria-label="Choose a source code ZIP" type="file" accept=".zip,application/zip" disabled={sourceContextBusy} onChange={(event) => { setSourceFile(event.target.files?.[0] ?? null); setSourceContextError(''); }} />
+                <button type="button" disabled={!sourceFile || sourceContextBusy} onClick={() => void handleSourceUpload()}>{sourceContextBusy ? 'Indexing…' : sourceContext.files ? 'Replace source ZIP' : 'Index source ZIP'}</button>
+                {sourceContext.files > 0 && <><span className="source-status">{sourceContext.files} files indexed</span><button type="button" className="source-delete" disabled={sourceContextBusy} onClick={() => void handleSourceDelete()}>Delete source context</button></>}
+                <label className="source-opt-in"><input type="checkbox" checked={useSourceContext} disabled={sourceContext.files === 0 || sourceContextBusy} onChange={(event) => setUseSourceContext(event.target.checked)} /> Include relevant code snippets when investigating an error</label>
+                {sourceContextError && <p className="form-error" role="alert">{sourceContextError}</p>}
               </div>
               {assistantTurns.map((turn, index) => (
                 <article className="assistant-turn" key={`${index}-${turn.question}`}>
@@ -456,6 +583,7 @@ export default function App() {
             </section>
 
             <div className="entries-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> SOURCE RECORDS</div><h2>Log entries</h2></div><span className="entry-count">{selectedLine ? `Line ${selectedLine} · ` : ''}{entries?.total ?? '—'} matching records</span></div>
+            {timeRange && <div className="active-time-filter" role="status">Showing entries from {timeRange.label}<button type="button" onClick={() => { setTimeRange(null); setPage(1); }}>Clear time filter</button></div>}
             <div className="filters">
               <form className="search-form" onSubmit={handleSearch}>
                 <span aria-hidden="true">⌕</span><input aria-label="Search log messages" maxLength={200} value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search messages…" />

@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import PurePath
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -12,7 +13,7 @@ from .database import get_db
 from .analytics import build_dataset_analytics
 from .ingestion import EmptyLogFileError, persist_parsed_upload
 from .models import LogEntry, UploadedDataset
-from .parser import SEVERITIES
+from .parser import SEVERITIES, StructuredLogLimitError
 from .schemas import DatasetAnalyticsResponse, PaginatedEntriesResponse, UploadResponse
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -50,12 +51,12 @@ async def _read_bounded_upload(upload: UploadFile, limit: int) -> bytes:
 async def upload_log_file(
     file: UploadFile = File(...), db: Session = Depends(get_db)
 ) -> UploadedDataset:
-    """Validate, parse, and persist one .log or .txt file."""
+    """Validate, parse, and persist one supported log or JSON file."""
     filename = file.filename or ""
     if not filename or len(filename) > _MAX_FILENAME_LENGTH:
         raise HTTPException(status_code=400, detail="Provide a filename up to 255 characters long.")
-    if PurePath(filename).suffix.lower() not in {".log", ".txt"}:
-        raise HTTPException(status_code=400, detail="Only .log and .txt files are accepted.")
+    if PurePath(filename).suffix.lower() not in {".log", ".txt", ".json", ".jsonl", ".ndjson"}:
+        raise HTTPException(status_code=400, detail="Supported files are .log, .txt, .json, .jsonl, and .ndjson.")
 
     raw_contents = await _read_bounded_upload(file, maximum_upload_bytes())
     try:
@@ -69,6 +70,8 @@ async def upload_log_file(
     try:
         return persist_parsed_upload(db, filename, raw_contents, text_contents)
     except EmptyLogFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except StructuredLogLimitError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -91,6 +94,8 @@ def list_entries(
     line_number: int | None = Query(default=None, ge=1),
     severity: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
+    timestamp_from: datetime | None = Query(default=None),
+    timestamp_to: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> PaginatedEntriesResponse:
     """Return entries for a dataset, optionally filtered and paginated."""
@@ -115,6 +120,14 @@ def list_entries(
         conditions.append(LogEntry.severity == normalized_severity)
     if q:
         conditions.append(func.lower(LogEntry.message).contains(q.lower(), autoescape=True))
+    normalized_from = _database_timestamp(timestamp_from) if timestamp_from else None
+    normalized_to = _database_timestamp(timestamp_to) if timestamp_to else None
+    if normalized_from:
+        conditions.append(LogEntry.timestamp >= normalized_from)
+    if normalized_to:
+        conditions.append(LogEntry.timestamp < normalized_to)
+    if normalized_from and normalized_to and normalized_from >= normalized_to:
+        raise HTTPException(status_code=422, detail="timestamp_to must be after timestamp_from.")
 
     total = db.scalar(select(func.count()).select_from(LogEntry).where(*conditions)) or 0
     entries_statement = (
@@ -133,6 +146,13 @@ def list_entries(
         total=total,
         total_pages=total_pages,
     )
+
+
+def _database_timestamp(value: datetime) -> datetime:
+    """Normalize explicit offsets to UTC before comparing with stored naive log times."""
+    if value.utcoffset() is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @router.get("/{upload_id}/analytics", response_model=DatasetAnalyticsResponse)
