@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
-import { askDatasetQuestion, checkHealth, deleteSourceContext, fetchDatasetAnalytics, fetchEntries, fetchSourceContextStatus, investigateErrorPattern, uploadLogFile, uploadSourceContext } from './api';
-import type { AIChatResponse, DatasetAnalytics, EvidenceReference, InvestigationWorkflow, LogEntry, PaginatedEntries, SourceContextSummary, UploadSummary } from './api';
-import { parseAssistantMarkdown } from './markdown.mjs';
-import type { InlineToken } from './markdown.mjs';
-import { getCitedLineSegments, getTimelineBarHeight, selectTimelineLabelIndices } from './presentation.mjs';
+import type { FormEvent } from 'react';
+import { askDatasetQuestion, checkHealth, deleteSourceContext, fetchDatasetAnalytics, fetchEntries, fetchSourceContextStatus, fetchUploads, investigateErrorPattern, uploadLogFile, uploadSourceContext } from './api';
+import type { AIChatResponse, DatasetAnalytics, InvestigationWorkflow, LogEntry, PaginatedEntries, SourceContextSummary, UploadSummary } from './api';
+import { getTimelineBarHeight, selectTimelineLabelIndices } from './presentation.mjs';
+import { AppShell, type WorkspaceSection } from './AppShell';
+import { AssistantAnswer } from './AssistantAnswer';
+import { OverviewDashboard } from './OverviewDashboard';
+import { InvestigationWorkflowPanel } from './InvestigationWorkflowPanel';
 
 type ConnectionState = 'loading' | 'connected' | 'error';
 const PAGE_SIZE = 25;
@@ -28,58 +30,6 @@ function formatTimelineLabel(timestamp: string, unit: DatasetAnalytics['timeline
   return value.slice(0, 10);
 }
 
-function renderInlineMarkdown(
-  tokens: InlineToken[],
-  citedLines: Set<number>,
-  onCitation: (lineNumber: number) => void,
-): ReactNode[] {
-  return tokens.flatMap((token, tokenIndex) => {
-    const segments = token.type === 'code'
-      ? [{ type: 'text' as const, value: token.value }]
-      : getCitedLineSegments(token.value, citedLines);
-    const content = segments.map((segment, segmentIndex) => segment.type === 'line'
-      ? <button
-          className="citation-link"
-          type="button"
-          key={`${tokenIndex}-${segmentIndex}`}
-          aria-label={`Open cited log line ${segment.lineNumber}`}
-          onClick={() => onCitation(segment.lineNumber)}
-        >{segment.value}</button>
-      : <span key={`${tokenIndex}-${segmentIndex}`}>{segment.value}</span>);
-
-    if (token.type === 'strong') return [<strong key={tokenIndex}>{content}</strong>];
-    if (token.type === 'emphasis') return [<em key={tokenIndex}>{content}</em>];
-    if (token.type === 'code') return [<code key={tokenIndex}>{content}</code>];
-    return content;
-  });
-}
-
-function renderAssistantAnswer(
-  answer: string,
-  citedEvidence: EvidenceReference[],
-  onCitation: (lineNumber: number) => void,
-): ReactNode {
-  const citedLines = new Set(citedEvidence.map((item) => item.line_number));
-  const blocks = parseAssistantMarkdown(answer).map((block, index) => {
-    if (block.type === 'heading') {
-      const heading = renderInlineMarkdown(block.tokens, citedLines, onCitation);
-      const headingText = block.tokens.map((token) => token.value).join('').toLowerCase();
-      const headingClass = headingText.includes('hypothes') || headingText.includes('explanation')
-        ? 'answer-heading hypothesis-heading'
-        : headingText.includes('observ') || headingText.includes('fact')
-          ? 'answer-heading fact-heading'
-          : 'answer-heading';
-      if (block.level === 1) return <h1 className={headingClass} key={index}>{heading}</h1>;
-      if (block.level === 2) return <h2 className={headingClass} key={index}>{heading}</h2>;
-      return <h3 className={headingClass} key={index}>{heading}</h3>;
-    }
-    if (block.type === 'paragraph') return <p key={index}>{renderInlineMarkdown(block.tokens, citedLines, onCitation)}</p>;
-    const items = block.items.map((tokens, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(tokens, citedLines, onCitation)}</li>);
-    return block.type === 'ordered-list' ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>;
-  });
-  return <div className="assistant-answer">{blocks}</div>;
-}
-
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>('loading');
   const [attempt, setAttempt] = useState(0);
@@ -87,7 +37,17 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [dataset, setDataset] = useState<UploadSummary | null>(null);
+  const [datasets, setDatasets] = useState<UploadSummary[]>([]);
+  const [datasetsLoading, setDatasetsLoading] = useState(true);
+  const [datasetsError, setDatasetsError] = useState('');
+  const [datasetsAttempt, setDatasetsAttempt] = useState(0);
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>('home');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [entries, setEntries] = useState<PaginatedEntries | null>(null);
+  const [overviewRecent, setOverviewRecent] = useState<LogEntry[]>([]);
+  const [overviewRecentLoading, setOverviewRecentLoading] = useState(false);
+  const [overviewRecentError, setOverviewRecentError] = useState('');
   const [entriesLoading, setEntriesLoading] = useState(false);
   const [entriesError, setEntriesError] = useState('');
   const [analytics, setAnalytics] = useState<DatasetAnalytics | null>(null);
@@ -136,6 +96,19 @@ export default function App() {
   }, [attempt, checkBackend]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    void fetchUploads(controller.signal).then((items) => {
+      if (controller.signal.aborted) return;
+      setDatasets(items);
+      setDatasetsError('');
+      if (!activeDatasetId.current && items.length) setDataset(items[0]);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setDatasetsError(error instanceof Error ? error.message : 'Could not load recent datasets.');
+    }).finally(() => { if (!controller.signal.aborted) setDatasetsLoading(false); });
+    return () => controller.abort();
+  }, [datasetsAttempt]);
+
+  useEffect(() => {
     if (!dataset) return;
     const controller = new AbortController();
     setEntriesLoading(true);
@@ -174,6 +147,20 @@ export default function App() {
   }, [dataset, analyticsAttempt]);
 
   useEffect(() => {
+    if (!dataset || dataset.total_entries === 0) { setOverviewRecent([]); setOverviewRecentError(''); return; }
+    const controller = new AbortController();
+    setOverviewRecentLoading(true);
+    setOverviewRecentError('');
+    void fetchEntries(dataset.id, {
+      page: Math.max(1, Math.ceil(dataset.total_entries / PAGE_SIZE)),
+      pageSize: PAGE_SIZE, severity: '', query: '',
+    }, controller.signal).then((result) => setOverviewRecent(result.items.slice(-5).reverse()))
+      .catch((error: unknown) => { if (!controller.signal.aborted) { setOverviewRecent([]); setOverviewRecentError(error instanceof Error ? error.message : 'Could not load recent log entries.'); } })
+      .finally(() => { if (!controller.signal.aborted) setOverviewRecentLoading(false); });
+    return () => controller.abort();
+  }, [dataset]);
+
+  useEffect(() => {
     if (!dataset) { setSourceContext({ files: 0, chunks: 0 }); return; }
     let current = true;
     void fetchSourceContextStatus(dataset.id).then((status) => { if (current) setSourceContext(status); }).catch(() => { if (current) setSourceContext({ files: 0, chunks: 0 }); });
@@ -187,6 +174,7 @@ export default function App() {
     setUploadError('');
     try {
       const result = await uploadLogFile(selectedFile);
+      setDatasets((items) => [result, ...items.filter((item) => item.id !== result.id)].slice(0, 100));
       assistantRequestToken.current += 1;
       setDataset(result);
       setEntries(null);
@@ -210,6 +198,26 @@ export default function App() {
     } finally {
       setUploading(false);
     }
+  }
+
+  function selectDataset(datasetId: string) {
+    const next = datasets.find((item) => item.id === datasetId);
+    if (!next || next.id === dataset?.id) return;
+    assistantRequestToken.current += 1;
+    setDataset(next);
+    setEntries(null);
+    setEntriesError('');
+    setPage(1); setSelectedLine(null); setTimeRange(null);
+    setSeverity(''); setSearchInput(''); setSearchTerm('');
+    setAssistantTurns([]); setAssistantError(''); setAssistantLoading(false);
+    setWorkflow(null); setWorkflowError(''); setWorkflowLoading(false);
+    setUseSourceContext(false); setSourceFile(null); setSourceContext({ files: 0, chunks: 0 }); setSourceContextBusy(false); setAnalytics(null);
+  }
+
+  function navigateToSection(section: WorkspaceSection) {
+    setActiveSection(section);
+    setMobileNavOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
@@ -246,17 +254,19 @@ export default function App() {
   }
 
   function focusLogLine(lineNumber: number) {
+    navigateToSection('log-explorer');
     setSelectedLine(lineNumber);
     setPage(1);
     setSearchInput('');
     setSearchTerm('');
     setSeverity('');
     setTimeRange(null);
-    document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    window.setTimeout(() => document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
 
   async function investigatePattern(fingerprint: string) {
     if (!dataset) return;
+    navigateToSection('ai-investigator');
     setWorkflowLoading(true);
     setWorkflowFingerprint(fingerprint);
     setWorkflowError('');
@@ -289,6 +299,7 @@ export default function App() {
   }
 
   function focusTimelineBucket(timestamp: string, unit: DatasetAnalytics['timeline']['bucket_unit'], interval: number) {
+    navigateToSection('log-explorer');
     const start = new Date(timestamp.endsWith('Z') ? timestamp : `${timestamp}Z`);
     const duration = unit === 'minute' ? 60_000 : unit === 'hour' ? 3_600_000 : unit === 'day' ? 86_400_000 : 604_800_000;
     const from = start.toISOString();
@@ -298,7 +309,7 @@ export default function App() {
     setPage(1);
     setSearchTerm('');
     setSearchInput('');
-    document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    window.setTimeout(() => document.getElementById('log-explorer')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
 
   const timelineBuckets = analytics?.timeline.buckets ?? [];
@@ -312,38 +323,51 @@ export default function App() {
     : null;
 
   return (
-    <main className="page-shell">
-      <header className="topbar">
-        <a className="brand" href="#home" aria-label="LogLens home">
-          <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
-          <span>LogLens</span>
-        </a>
-        <span className="phase-label">LOCAL PREVIEW <i /></span>
-      </header>
-      <nav className="workspace-nav" aria-label="Workspace sections">
-        <a href="#home">Overview</a><a href="#log-explorer">Log Explorer</a><a href="#analytics">Analytics</a><a href="#ai-investigator">AI Investigator</a>
-      </nav>
-
-      <section className="hero" id="home">
-        <div className="eyebrow"><span className="eyebrow-line" /> APPLICATION LOG INTELLIGENCE</div>
-        <h1>Make sense of<br /><span>what happened.</span></h1>
-        <p className="intro">Turn application logs into searchable evidence. Upload a file to inspect its entries and spot important events.</p>
-
-        <section className={`connection-card ${connection}`} aria-live="polite" aria-busy={connection === 'loading'}>
-          <div className="connection-icon" aria-hidden="true">
-            {connection === 'loading' ? <span className="spinner" /> : connection === 'connected' ? <span className="check">✓</span> : <span className="warning">!</span>}
-          </div>
-          <div className="connection-copy">
-            <div className="connection-heading">
-              <h2>{connection === 'loading' ? 'Checking connection' : connection === 'connected' ? 'Backend connected' : 'Backend unavailable'}</h2>
-              <span className={`status-pill ${connection}`}>{connection === 'loading' ? 'CONNECTING' : connection === 'connected' ? 'ONLINE' : 'OFFLINE'}</span>
-            </div>
-            <p>{connection === 'loading' ? 'Contacting the local LogLens API…' : connection === 'connected' ? 'The API is responding and ready for the next step.' : 'Could not reach the API. Start the backend, then try again.'}</p>
+    <AppShell
+      section={activeSection}
+      health={connection}
+      datasets={datasets}
+      dataset={dataset}
+      datasetsLoading={datasetsLoading}
+      mobileNavOpen={mobileNavOpen}
+      onSelectDataset={selectDataset}
+      onSectionChange={navigateToSection}
+      onToggleMobileNav={() => setMobileNavOpen((open) => !open)}
+      onCloseMobileNav={() => setMobileNavOpen(false)}
+      onRetryHealth={() => setAttempt((value) => value + 1)}
+      onUploadClick={() => navigateToSection('log-explorer')}
+    >
+      <section className="page-view" id="home">
+        <div className="page-heading"><div><h1>Overview</h1><p>Review activity, severity, and error patterns in the selected dataset.</p></div></div>
+        {connection !== 'connected' && <section className={`connection-card ${connection}`} aria-live="polite" aria-busy={connection === 'loading'}>
+          <div className="connection-icon" aria-hidden="true">{connection === 'loading' ? <span className="spinner" /> : <span className="warning">!</span>}</div>
+          <div className="connection-copy"><div className="connection-heading"><h2>{connection === 'loading' ? 'Checking backend connection' : 'Backend unavailable'}</h2><span className={`status-pill ${connection}`}>{connection === 'loading' ? 'CONNECTING' : 'OFFLINE'}</span></div>
+            <p>{connection === 'loading' ? 'Contacting the LogLens API…' : 'The API could not be reached. Start the backend and retry.'}</p>
             {connection === 'error' && <button className="retry-button" onClick={() => setAttempt((value) => value + 1)}>Retry connection <span aria-hidden="true">↻</span></button>}
           </div>
-        </section>
-
+        </section>}
+        {!dataset && !datasetsLoading && <div className="dataset-load-empty">{datasetsError ? <><span role="alert">{datasetsError}</span><button type="button" onClick={() => { setDatasetsLoading(true); setDatasetsAttempt((value) => value + 1); }}>Retry loading datasets</button></> : <span>No uploaded datasets were found. Use Upload logs to get started.</span>}</div>}
+        <OverviewDashboard
+          dataset={dataset}
+          analytics={analyticsDatasetId === dataset?.id ? analytics : null}
+          analyticsLoading={analyticsLoading}
+          analyticsError={analyticsError}
+          recentEntries={overviewRecent}
+          recentLoading={overviewRecentLoading}
+          recentError={overviewRecentError}
+          onRetryAnalytics={() => setAnalyticsAttempt((value) => value + 1)}
+          onFocusLine={focusLogLine}
+          onTimeBucket={(bucket) => focusTimelineBucket(bucket.timestamp, analytics?.timeline.bucket_unit ?? 'none', analytics?.timeline.bucket_interval ?? 1)}
+          onNavigate={navigateToSection}
+          onInvestigate={(fingerprint) => void investigatePattern(fingerprint)}
+        />
       </section>
+
+      {!dataset && activeSection !== 'home' && activeSection !== 'log-explorer' && <section className="empty-dataset panel workspace-empty" aria-label="No dataset selected">
+        <span className="empty-dataset-icon" aria-hidden="true">⌁</span><h2>Select a dataset to continue</h2>
+        <p>Upload a log file or select an existing dataset to view analytics and ask the AI investigator questions.</p>
+        <button type="button" onClick={() => navigateToSection('log-explorer')}>Go to Log Explorer <span aria-hidden="true">→</span></button>
+      </section>}
 
       <section className="workspace" id="log-explorer" aria-label="Log file explorer">
         <div className="section-heading">
@@ -352,10 +376,11 @@ export default function App() {
         </div>
 
         <form className="upload-panel" onSubmit={handleUpload}>
-          <label className="file-picker">
+          <label className={`file-picker ${isDragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDragging(false); }} onDrop={(event) => { event.preventDefault(); setIsDragging(false); const file = event.dataTransfer.files[0]; if (file) { setSelectedFile(file); setUploadError(''); } }}>
             <span className="file-picker-icon" aria-hidden="true">↑</span>
-            <span><strong>Choose a log file</strong><small>Supported formats: .log, .txt, .json, .jsonl, and .ndjson</small></span>
+            <span><strong>{isDragging ? 'Drop your log file here' : 'Drop a log file here or browse'}</strong><small>Supported: .log, .txt, .json, .jsonl, and .ndjson</small></span>
             <input
+              id="log-file-input"
               type="file"
               accept=".log,.txt,.json,.jsonl,.ndjson,text/plain,application/json"
               onChange={(event) => {
@@ -510,32 +535,19 @@ export default function App() {
                       </article>
                     ))}</div> : <p className="analytics-empty">No error patterns were found in this dataset. ERROR, FATAL, and CRITICAL entries will appear here.</p>}
                   </section>
-                  {(workflowLoading || workflowError || workflow) && <section className="workflow-panel" aria-label="AI troubleshooting workflow" aria-busy={workflowLoading}>
-                    <div className="workflow-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> AI INVESTIGATION</div><h3>{workflow?.title ?? 'Troubleshooting workflow'}</h3></div>{workflow && <span className="workflow-safety">Suggested steps · root cause unconfirmed</span>}</div>
-                    {workflowLoading && <p className="assistant-status" role="status"><span className="spinner" /> Reviewing selected error and nearby log evidence…</p>}
-                    {workflowError && <p className="form-error" role="alert">{workflowError} <button type="button" onClick={() => workflowFingerprint && void investigatePattern(workflowFingerprint)}>Retry</button></p>}
-                    {workflow && <><p className="workflow-summary">{workflow.summary}</p>{workflow.source_context_used && <p className="workflow-caution">Relevant source snippets were included by your request. Code evidence does not establish runtime behavior.</p>}<div className="workflow-graph" role="list" aria-label="Investigation steps">
-                      {workflow.nodes.map((node) => <div className="workflow-node-wrap" key={node.id}>
-                        <div className={`workflow-node ${selectedWorkflowNode === node.id ? 'selected' : ''}`} role="listitem">
-                          <button type="button" className="workflow-node-toggle" onClick={() => setSelectedWorkflowNode(selectedWorkflowNode === node.id ? null : node.id)} aria-expanded={selectedWorkflowNode === node.id}>
-                            <span className={`workflow-status ${node.status}`}>{node.status.replace('_', ' ')}</span><strong>{node.title}</strong><small>{node.kind.replaceAll('_', ' ')}</small>
-                          </button>
-                          {selectedWorkflowNode === node.id && <div className="workflow-description">{node.description}{node.evidence_lines.length > 0 && <div className="workflow-lines">Log evidence: {node.evidence_lines.map((line) => <span key={line}><button type="button" className="line-link" onClick={() => focusLogLine(line)}>Line {line}</button>{' '}</span>)}</div>}{node.source_refs.length > 0 && <div className="workflow-lines">Source evidence: {node.source_refs.map((reference) => <span key={reference}><a href={`#source-${reference}`}>{workflow.source_evidence.find((item) => item.reference === reference)?.file_path ?? reference}</a>{' '}</span>)}</div>}</div>}
-                        </div>
-                        {workflow.edges.filter((edge) => edge.source === node.id).map((edge) => <button type="button" className="workflow-edge" key={`${edge.source}-${edge.target}`} onClick={() => setSelectedWorkflowNode(edge.target)} aria-label={`Follow ${edge.label || 'workflow edge'} to ${workflow.nodes.find((target) => target.id === edge.target)?.title ?? edge.target}`}>
-                          <span aria-hidden="true">→</span> {edge.label || 'Continue to'} <span aria-hidden="true">→</span> {workflow.nodes.find((target) => target.id === edge.target)?.title ?? edge.target}
-                        </button>)}
-                      </div>)}
-                    </div><p className="workflow-caution">Recommendations are investigation ideas, not confirmed causes. Verify them against the application and infrastructure.</p>
-                    {workflow.limitations.length > 0 && <ul className="workflow-limitations">{workflow.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>}
-                    {workflow.evidence.length > 0 && <div className="evidence-list"><strong>Validated log evidence</strong>{workflow.evidence.map((item) => <div className="evidence-item" key={item.id}><span><button type="button" className="line-link" onClick={() => focusLogLine(item.line_number)}>Line {item.line_number}</button>{item.severity ? ` · ${item.severity}` : ''}</span><p>{item.parsed ? item.message : item.raw_line ?? item.message}</p>{!item.parsed && <small>Unparsed original text; structured fields are unavailable.</small>}</div>)}</div>}
-                    {workflow.source_evidence.length > 0 && <div className="evidence-list source-evidence"><strong>Source-code evidence · code observations do not prove runtime behavior</strong>{workflow.source_evidence.map((item) => <div className="evidence-item" id={`source-${item.reference}`} key={item.reference}><span>{item.reference} · {item.file_path} · chunk {item.chunk_index + 1}</span><pre>{item.content}</pre></div>)}</div>}
-                    {workflow.verification_steps.length > 0 && <div className="workflow-verifications"><strong>Verification steps</strong><ol>{workflow.verification_steps.map((step, index) => <li key={index}>{step}</li>)}</ol></div>}
-                    </>}
-                  </section>}
                 </>
               ) : null}
             </section>
+
+            <InvestigationWorkflowPanel
+              workflow={workflow}
+              loading={workflowLoading}
+              error={workflowError}
+              selectedNode={selectedWorkflowNode}
+              onSelectNode={setSelectedWorkflowNode}
+              onRetry={() => workflowFingerprint && void investigatePattern(workflowFingerprint)}
+              onFocusLine={focusLogLine}
+            />
 
             <section className="assistant-panel" id="ai-investigator" aria-label="AI log assistant">
               <div className="assistant-heading">
@@ -553,7 +565,7 @@ export default function App() {
               {assistantTurns.map((turn, index) => (
                 <article className="assistant-turn" key={`${index}-${turn.question}`}>
                   <p className="assistant-question">{turn.question}</p>
-                  {renderAssistantAnswer(turn.result.answer, turn.result.cited_evidence, focusLogLine)}
+                  <AssistantAnswer answer={turn.result.answer} citedEvidence={turn.result.cited_evidence} onCitation={focusLogLine} />
                   <p className="assistant-result-meta" role="status">
                     {turn.result.cited_evidence.length > 0
                       ? `Response ready · ${turn.result.cited_evidence.length} cited entr${turn.result.cited_evidence.length === 1 ? 'y' : 'ies'}`
@@ -620,7 +632,6 @@ export default function App() {
         )}
       </section>
 
-      <footer><span>LOG LENS <span className="footer-dot">·</span> PHASE 4</span><span>Built for clearer debugging</span></footer>
-    </main>
+    </AppShell>
   );
 }

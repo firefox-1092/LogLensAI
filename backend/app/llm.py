@@ -123,7 +123,11 @@ def _normalize_completion(payload: Any) -> LLMCompletion:
     )
 
 
-def _groq_completion(configuration: LLMConfiguration, messages: list[dict[str, str]]) -> Any:
+def _groq_completion(
+    configuration: LLMConfiguration,
+    messages: list[dict[str, str]],
+    max_output_tokens: int,
+) -> Any:
     try:
         from groq import APIConnectionError, APITimeoutError, APIStatusError, Groq, RateLimitError
     except ImportError:
@@ -134,7 +138,7 @@ def _groq_completion(configuration: LLMConfiguration, messages: list[dict[str, s
         return client.chat.completions.create(
             model=configuration.model,
             messages=messages,
-            max_completion_tokens=2000,
+            max_completion_tokens=max_output_tokens,
             temperature=0.2,
         )
     except APITimeoutError:
@@ -152,7 +156,11 @@ def _groq_completion(configuration: LLMConfiguration, messages: list[dict[str, s
         raise LLMProviderError("provider_request_error") from None
 
 
-def _openrouter_completion(configuration: LLMConfiguration, messages: list[dict[str, str]]) -> Any:
+def _openrouter_completion(
+    configuration: LLMConfiguration,
+    messages: list[dict[str, str]],
+    max_output_tokens: int,
+) -> Any:
     try:
         import httpx
     except ImportError:
@@ -166,7 +174,7 @@ def _openrouter_completion(configuration: LLMConfiguration, messages: list[dict[
                 "Content-Type": "application/json",
                 "X-Title": "LogLens",
             },
-            json={"model": configuration.model, "messages": messages, "max_tokens": 2000, "temperature": 0.2},
+            json={"model": configuration.model, "messages": messages, "max_tokens": max_output_tokens, "temperature": 0.2},
             timeout=25.0,
         )
     except httpx.TimeoutException:
@@ -187,15 +195,19 @@ def _openrouter_completion(configuration: LLMConfiguration, messages: list[dict[
         raise LLMProviderError("invalid_provider_json") from None
 
 
-def complete_chat(messages: list[dict[str, str]]) -> LLMCompletion:
+def complete_chat(
+    messages: list[dict[str, str]], *, max_output_tokens: int = 2000
+) -> LLMCompletion:
     """Call the configured provider and normalize response metadata."""
+    if not 1 <= max_output_tokens <= 4096:
+        raise ValueError("max_output_tokens must be between 1 and 4096.")
     configuration = get_configuration()
     started = time.monotonic()
     try:
         raw = (
-            _groq_completion(configuration, messages)
+            _groq_completion(configuration, messages, max_output_tokens)
             if configuration.provider == "groq"
-            else _openrouter_completion(configuration, messages)
+            else _openrouter_completion(configuration, messages, max_output_tokens)
         )
         completion = _normalize_completion(raw)
     except (LLMConfigurationError, LLMProviderError) as exc:

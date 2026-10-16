@@ -31,6 +31,18 @@ _LINE_CITATION = re.compile(
     r"\blines?\s+((?:\d+)(?:\s*(?:,\s*(?:(?:and|or|&)\s*)?|(?:and|or|&)\s*|to\s*|[-–]\s*)\d+)*)",
     re.IGNORECASE,
 )
+_HTTP_STATUS = re.compile(
+    r"\bHTTP\s+([1-5]\d{2})\b|\bstatus(?:\s+code)?\s*[:=]?\s*([1-5]\d{2})\b",
+    re.IGNORECASE,
+)
+_ENDPOINT_PATH = re.compile(
+    r"(?<![A-Za-z0-9])(/(?:[A-Za-z0-9._~!$&'()*+,;=:@%/-]*[A-Za-z0-9_~$&=:@%/-])?)"
+)
+_ACCESS_REQUEST = re.compile(
+    r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\s+(\S+)",
+    re.IGNORECASE,
+)
+_ACCESS_STATUS = re.compile(r"\bHTTP\s+([1-5]\d{2})\b", re.IGNORECASE)
 _STOP_WORDS = {
     "about", "after", "and", "are", "before", "can", "could", "did", "does",
     "for", "from", "have", "help", "into", "is", "log", "logs", "show",
@@ -100,6 +112,73 @@ def _context_size(entries: list[LogEntry]) -> int:
     return len(json.dumps(_entry_context(entries), ensure_ascii=True))
 
 
+def _query_signals(question: str) -> tuple[str | None, str | None]:
+    """Extract literal HTTP endpoint and status signals from a question."""
+    status_match = _HTTP_STATUS.search(question)
+    status = (
+        next((value for value in status_match.groups() if value), None)
+        if status_match
+        else None
+    )
+    endpoint = None
+    for match in _ENDPOINT_PATH.finditer(question):
+        candidate = match.group(1).rstrip(".,;:!?)]}")
+        if candidate != "/":
+            endpoint = candidate
+    return endpoint, status
+
+
+def _request_path(entry: LogEntry) -> str | None:
+    match = _ACCESS_REQUEST.search(entry.message)
+    if match is None:
+        return None
+    path = match.group(1).split("?", 1)[0]
+    return path if path.startswith("/") else None
+
+
+def _related_redirect(candidate: LogEntry, target: LogEntry) -> bool:
+    """Accept a nearby redirect only when route and timestamp support a relation."""
+    candidate_path = _request_path(candidate)
+    target_path = _request_path(target)
+    candidate_status = _ACCESS_STATUS.search(candidate.message)
+    target_status = _ACCESS_STATUS.search(target.message)
+    if not all(
+        (
+            candidate_path,
+            target_path,
+            candidate_status,
+            target_status,
+            candidate.timestamp,
+            target.timestamp,
+        )
+    ):
+        return False
+    candidate_route = candidate_path.rstrip("/").rsplit("/", 1)[-1].casefold()
+    target_route = target_path.rstrip("/").rsplit("/", 1)[-1].casefold()
+    elapsed = abs((target.timestamp - candidate.timestamp).total_seconds())
+    return (
+        candidate_route == target_route
+        and elapsed <= 120
+        and 300 <= int(candidate_status.group(1)) < 400
+        and int(target_status.group(1)) >= 400
+    )
+
+
+def _bounded_selection(
+    entries: list[LogEntry], total_entries: int, *, complete: bool = False
+) -> EvidenceSelection:
+    selected: list[LogEntry] = []
+    truncated = False
+    for entry in entries:
+        if len(selected) >= _MAX_EVIDENCE:
+            break
+        if len(entry.message) > _MAX_MESSAGE_CHARS:
+            truncated = True
+        if _context_size([*selected, entry]) <= _MAX_CONTEXT_CHARS:
+            selected.append(entry)
+    return EvidenceSelection(selected, total_entries, complete, truncated)
+
+
 def _retrieve_evidence(
     db: Session, dataset_id: uuid.UUID, question: str, history: list[AIChatHistoryTurn]
 ) -> EvidenceSelection:
@@ -119,6 +198,74 @@ def _retrieve_evidence(
         len(entry.message) <= _MAX_MESSAGE_CHARS for entry in all_entries
     ) and _context_size(all_entries) <= _MAX_CONTEXT_CHARS:
         return EvidenceSelection(all_entries, total_entries, True)
+
+    endpoint, status = _query_signals(question)
+    if endpoint or status:
+        filters = [LogEntry.dataset_id == dataset_id]
+        if endpoint:
+            message = func.lower(LogEntry.message)
+            normalized_endpoint = endpoint.lower()
+            filters.append(
+                or_(
+                    message.contains(f" {normalized_endpoint} http/", autoescape=True),
+                    message.contains(f" {normalized_endpoint}?", autoescape=True),
+                )
+            )
+        if status:
+            filters.append(func.lower(LogEntry.message).contains(f"http {status}".lower(), autoescape=True))
+
+        exact_matches = list(
+            db.scalars(
+                select(LogEntry)
+                .where(*filters)
+                .order_by(LogEntry.line_number)
+                .limit(_MAX_CANDIDATES)
+            ).all()
+        )
+        # When both signals were explicit, use endpoint-only records as useful context
+        # if the requested status was not recorded. Never fall back to generic errors.
+        targeted = exact_matches
+        if not targeted and endpoint and status:
+            targeted = list(
+                db.scalars(
+                    select(LogEntry)
+                    .where(
+                        LogEntry.dataset_id == dataset_id,
+                        or_(
+                            func.lower(LogEntry.message).contains(
+                                f" {endpoint.lower()} http/", autoescape=True
+                            ),
+                            func.lower(LogEntry.message).contains(
+                                f" {endpoint.lower()}?", autoescape=True
+                            ),
+                        ),
+                    )
+                    .order_by(LogEntry.line_number)
+                    .limit(_MAX_CANDIDATES)
+                ).all()
+            )
+
+        if endpoint and status and exact_matches:
+            nearby_lines = {
+                line
+                for entry in exact_matches
+                for line in range(max(1, entry.line_number - 2), entry.line_number + 1)
+            }
+            neighboring = list(
+                db.scalars(
+                    select(LogEntry)
+                    .where(LogEntry.dataset_id == dataset_id, LogEntry.line_number.in_(nearby_lines))
+                    .order_by(LogEntry.line_number)
+                ).all()
+            )
+            related = [
+                item for item in neighboring
+                if item not in exact_matches
+                and any(_related_redirect(item, target) for target in exact_matches)
+            ]
+            targeted = sorted([*related, *exact_matches], key=lambda item: item.line_number)
+
+        return _bounded_selection(targeted[:_MAX_CANDIDATES], total_entries)
 
     # Current question terms are never crowded out by older follow-up context.
     current_terms = _search_terms(question)
@@ -149,15 +296,7 @@ def _retrieve_evidence(
         return matched_terms + int(entry.severity in severities)
 
     candidates.sort(key=lambda entry: (-relevance(entry), entry.line_number))
-    selected: list[LogEntry] = []
-    truncated = False
-    for entry in candidates[:_MAX_EVIDENCE]:
-        if len(entry.message) > _MAX_MESSAGE_CHARS:
-            truncated = True
-        proposed = [*selected, entry]
-        if _context_size(proposed) <= _MAX_CONTEXT_CHARS:
-            selected.append(entry)
-    return EvidenceSelection(selected, total_entries, False, truncated)
+    return _bounded_selection(candidates, total_entries)
 
 
 def _entry_context(entries: list[LogEntry]) -> list[dict[str, str | int | None]]:
@@ -267,6 +406,23 @@ def ask_about_dataset(
     selection = _retrieve_evidence(db, dataset_id, request.question, request.history)
     evidence_rows = selection.entries
     if not evidence_rows:
+        endpoint, status = _query_signals(request.question)
+        if endpoint or status:
+            target = " and ".join(
+                value for value in (
+                    f"endpoint {endpoint!r}" if endpoint else None,
+                    f"HTTP {status}" if status else None,
+                ) if value
+            )
+            return AIChatResponse(
+                answer=(
+                    f"No log entries matching {target} were found in the selected dataset. "
+                    "This search checked the dataset for the specified literal endpoint and status; "
+                    "it does not establish why the event did not occur."
+                ),
+                evidence=[],
+                cited_evidence=[],
+            )
         return AIChatResponse(
             answer=(
                 "No matching entries were found in the retrieved records. This does not establish "

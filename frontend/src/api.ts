@@ -120,6 +120,11 @@ export async function uploadLogFile(file: File): Promise<UploadSummary> {
   return readResponse<UploadSummary>(response);
 }
 
+export async function fetchUploads(signal?: AbortSignal): Promise<UploadSummary[]> {
+  const response = await fetch(`${apiBaseUrl}/api/uploads?limit=100`, { signal });
+  return readResponse<UploadSummary[]>(response);
+}
+
 export async function fetchEntries(
   uploadId: string,
   options: { page: number; pageSize: number; severity: string; query: string; lineNumber?: number | null; timestampFrom?: string | null; timestampTo?: string | null },

@@ -294,6 +294,46 @@ def test_analytics_summarizes_only_selected_dataset(client: TestClient) -> None:
     ]
 
 
+def test_access_log_upload_drives_dataset_analytics_and_groups_volatile_requests(client: TestClient) -> None:
+    contents = (
+        '192.0.2.10 - - [22/Jan/2019:05:18:41 +0330] "GET /api/items?user=1 HTTP/1.1" 500 120 "-" "Agent A" "-"\n'
+        '192.0.2.11 - - [22/Jan/2019:05:19:41 +0330] "GET /api/items?user=2 HTTP/1.1" 500 240 "https://example.test/" "Agent B" "-"\n'
+        '192.0.2.12 - - [22/Jan/2019:05:20:41 +0330] "GET /missing HTTP/1.1" 404 - "-" "Agent C" "-"\n'
+        'not an access record\n'
+    )
+    dataset_id = upload(client, "access.log", contents)
+    upload(
+        client,
+        "other-access.log",
+        '192.0.2.20 - - [22/Jan/2019:05:18:41 +0330] "GET /api/items?user=3 HTTP/1.1" 500 120 "-" "Agent D" "-"\n',
+    )
+
+    uploaded = client.get("/api/uploads").json()
+    selected = next(item for item in uploaded if item["id"] == dataset_id)
+    entries_response = client.get(f"/api/uploads/{dataset_id}/entries?page_size=10")
+    entries = entries_response.json()["items"]
+    analytics = client.get(f"/api/uploads/{dataset_id}/analytics").json()
+
+    assert (selected["total_entries"], selected["parsed_entries"], selected["unparsed_entries"]) == (4, 3, 1)
+    assert [item["line_number"] for item in entries] == [1, 2, 3, 4]
+    assert entries[0]["raw_line"] == contents.splitlines()[0]
+    assert entries[0]["parsed"] is True and entries[0]["severity"] == "ERROR"
+    assert entries[3]["parsed"] is False and entries[3]["raw_line"] == "not an access record"
+    assert analytics["error_count"] == 2
+    assert analytics["warning_count"] == 1
+    assert analytics["severity_counts"]["ERROR"] == 2
+    assert analytics["severity_counts"]["WARN"] == 1
+    assert analytics["unparsed_entries"] == 1
+    assert analytics["recurring_error_patterns"] == 1
+    recurring = next(pattern for pattern in analytics["error_patterns"] if pattern["recurring"])
+    assert recurring["occurrences"] == 2
+    assert recurring["representative_line_numbers"] == [1, 2]
+    assert "?user=" not in normalize_error_message(entries[0]["message"])
+    assert "192.0.2.20" not in recurring["representative_message"]
+    assert analytics["timeline"]["bucket_unit"] == "minute"
+    assert sum(bucket["entries"] for bucket in analytics["timeline"]["buckets"]) == 3
+
+
 def test_analytics_has_empty_timeline_without_parsed_timestamps(client: TestClient) -> None:
     upload_id = upload(client, "unparsed.txt", "not a timestamped entry\n")
 

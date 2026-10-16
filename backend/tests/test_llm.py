@@ -98,9 +98,10 @@ def test_groq_call_uses_selected_model_and_logs_no_secret(
     monkeypatch.setenv("GROQ_API_KEY", "private-test-key")
     monkeypatch.setenv("GROQ_MODEL", "selected/groq-model")
 
-    result = complete_chat([{"role": "user", "content": "Question"}])
+    result = complete_chat([{"role": "user", "content": "Question"}], max_output_tokens=2500)
 
     assert captured["model"] == "selected/groq-model"
+    assert captured["max_completion_tokens"] == 2500
     assert result.content == "A complete answer."
     assert result.completion_status == "complete"
     assert "provider=groq" in caplog.text
@@ -133,6 +134,7 @@ def test_openrouter_call_uses_official_endpoint_and_selected_model(monkeypatch: 
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer private-openrouter-test-key"
     assert captured["json"]["model"] == "selected/router-model"
+    assert captured["json"]["max_tokens"] == 2000
     assert result.content == "Router answer."
 
 
@@ -185,9 +187,14 @@ def test_openrouter_request_token_budget_is_suitable_for_bounded_workflow(monkey
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OPENROUTER_MODEL", "selected/router-model")
 
-    complete_chat([{"role": "user", "content": "workflow"}])
+    complete_chat([{"role": "user", "content": "workflow"}], max_output_tokens=2750)
 
-    assert captured["json"]["max_tokens"] == 2000
+    assert captured["json"]["max_tokens"] == 2750
+
+
+def test_output_token_budget_is_bounded() -> None:
+    with pytest.raises(ValueError, match="between 1 and 4096"):
+        complete_chat([{"role": "user", "content": "workflow"}], max_output_tokens=4097)
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,10 @@
-"""Parse the initial timestamp/severity/message log format."""
+"""Parse application logs, Apache/Nginx combined access logs, and JSON."""
 
+import ipaddress
 import re
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SEVERITIES = {"TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL", "CRITICAL"}
 _LOG_LINE = re.compile(
@@ -11,6 +12,28 @@ _LOG_LINE = re.compile(
     r"(?P<severity>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\s+"
     r"(?P<message>.+?)\s*$",
     re.IGNORECASE,
+)
+_ACCESS_LOG_LINE = re.compile(
+    r'^(?P<client_ip>\S+)\s+\S+\s+\S+\s+'
+    r'\[(?P<timestamp>[^\]]+)\]\s+'
+    r'"(?P<request>(?:\\.|[^"\\])*)"\s+'
+    r'(?P<status>\d{3})\s+(?P<size>\S+)'
+    r'(?:\s+"(?P<referer>(?:\\.|[^"\\])*)")?'
+    r'(?:\s+"(?P<user_agent>(?:\\.|[^"\\])*)")?'
+    r'(?:\s+"(?P<extra>(?:\\.|[^"\\])*)")?\s*$'
+)
+_ACCESS_TIMESTAMP = re.compile(
+    r"^(?P<day>\d{2})/(?P<month>[A-Za-z]{3})/(?P<year>\d{4}):"
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}) "
+    r"(?P<sign>[+-])(?P<offset_hour>\d{2})(?P<offset_minute>\d{2})$"
+)
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_REQUEST_LINE = re.compile(
+    r"^(?P<method>[!#$%&'*+.^_`|~0-9A-Za-z-]+)\s+"
+    r"(?P<target>.+?)\s+(?P<protocol>HTTP/\d(?:\.\d)?)$"
 )
 
 
@@ -29,6 +52,11 @@ def parse_log_text(contents: str) -> list[ParsedLogLine]:
     entries: list[ParsedLogLine] = []
     for line_number, raw_line in enumerate(contents.splitlines(), start=1):
         if not raw_line.strip():
+            continue
+
+        access_entry = _parse_access_log_line(raw_line, line_number)
+        if access_entry is not None:
+            entries.append(access_entry)
             continue
 
         match = _LOG_LINE.fullmatch(raw_line)
@@ -60,6 +88,88 @@ def parse_log_text(contents: str) -> list[ParsedLogLine]:
             )
         )
     return entries
+
+
+def _parse_access_timestamp(value: str) -> datetime | None:
+    match = _ACCESS_TIMESTAMP.fullmatch(value)
+    if match is None:
+        return None
+    parts = match.groupdict()
+    month = _MONTHS.get(parts["month"].casefold())
+    offset_hour = int(parts["offset_hour"])
+    offset_minute = int(parts["offset_minute"])
+    if month is None or offset_minute > 59 or offset_hour > 23:
+        return None
+    offset = timedelta(hours=offset_hour, minutes=offset_minute)
+    if parts["sign"] == "-":
+        offset = -offset
+    try:
+        return datetime(
+            int(parts["year"]), month, int(parts["day"]), int(parts["hour"]),
+            int(parts["minute"]), int(parts["second"]), tzinfo=timezone(offset),
+        )
+    except ValueError:
+        return None
+
+
+def _unescape_access_field(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return re.sub(r"\\(.)", r"\1", value)
+
+
+def _parse_access_log_line(raw_line: str, line_number: int) -> ParsedLogLine | None:
+    match = _ACCESS_LOG_LINE.fullmatch(raw_line)
+    if match is None:
+        return None
+    fields = match.groupdict()
+    try:
+        client_ip = str(ipaddress.ip_address(fields["client_ip"]))
+    except ValueError:
+        return None
+    timestamp = _parse_access_timestamp(fields["timestamp"])
+    status_code = int(fields["status"])
+    if timestamp is None or not 100 <= status_code <= 599:
+        return None
+    response_size = fields["size"]
+    if response_size != "-" and not response_size.isdecimal():
+        return None
+
+    request = _unescape_access_field(fields["request"]) or ""
+    request_match = _REQUEST_LINE.fullmatch(request)
+    if request == "-":
+        request_description = "request unavailable"
+    elif request_match is not None:
+        request_description = request
+    else:
+        return None
+
+    size_description = "bytes unavailable" if response_size == "-" else f"{response_size} bytes"
+    referer = _unescape_access_field(fields["referer"])
+    user_agent = _unescape_access_field(fields["user_agent"])
+    extra = _unescape_access_field(fields["extra"])
+    details = [
+        f"client_ip={client_ip}",
+        f"HTTP {status_code}",
+        f"{request_description}",
+        f"response_size={size_description}",
+        f"timestamp={fields['timestamp']}",
+    ]
+    if referer is not None:
+        details.append(f"referer={referer}")
+    if user_agent is not None:
+        details.append(f"user_agent={user_agent}")
+    if extra is not None:
+        details.append(f"extra={extra}")
+    severity = "INFO" if status_code < 400 else "WARN" if status_code < 500 else "ERROR"
+    return ParsedLogLine(
+        line_number=line_number,
+        timestamp=timestamp,
+        severity=severity,
+        message=" | ".join(details),
+        raw_line=raw_line,
+        parsed=True,
+    )
 
 
 _JSON_TIMESTAMP_KEYS = ("timestamp", "time", "@timestamp", "datetime")

@@ -197,6 +197,105 @@ def test_keyword_variants_find_started_entry_in_large_dataset(
     assert "RETRIEVED SUBSET" in captured["scope"]
 
 
+def _access_record(minute: int, second: int, path: str, status: int) -> str:
+    return (
+        f'203.0.113.7 - - [11/Oct/2026:10:{minute:02d}:{second:02d} +0000] '
+        f'"GET {path} HTTP/1.1" {status} 120 "-" "Mozilla/5.0"'
+    )
+
+
+def test_exact_http_endpoint_retrieval_beats_early_generic_matches_and_adds_related_redirect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        _access_record(index // 60, index % 60, f"/m/other/{index}", 200)
+        for index in range(120)
+    ]
+    records.extend(
+        [
+            _access_record(3, 0, "/site/guaranteeDays", 302),
+            _access_record(3, 1, "/m/guaranteeDays", 500),
+        ]
+    )
+    upload = client.post(
+        "/api/uploads", files={"file": ("access.log", "\n".join(records).encode(), "text/plain")}
+    )
+    assert upload.status_code == 201
+    upload_id = upload.json()["id"]
+    captured: dict[str, object] = {}
+
+    def fake_completion(_question, evidence, _history, scope):
+        captured.update(evidence=evidence, scope=scope)
+        return completed(
+            "Line 121 records the redirect (HTTP 302) and line 122 records HTTP 500 "
+            "for /m/guaranteeDays. The sequence alone does not establish causation."
+        )
+
+    monkeypatch.setattr("backend.app.ai._request_llm_completion", fake_completion)
+    response = ask(
+        client,
+        upload_id,
+        "Which records show HTTP 500 for /m/guaranteeDays, and was it preceded by a redirect?",
+    )
+
+    assert response.status_code == 200
+    evidence = captured["evidence"]
+    assert [entry["line_number"] for entry in evidence] == [121, 122]
+    assert "HTTP 302" in evidence[0]["message"]
+    assert "/site/guaranteeDays" in evidence[0]["message"]
+    assert "HTTP 500" in evidence[1]["message"]
+    assert "/m/guaranteeDays" in evidence[1]["message"]
+    assert "RETRIEVED SUBSET" in captured["scope"]
+    body = response.json()
+    assert [entry["line_number"] for entry in body["cited_evidence"]] == [121, 122]
+    dataset_rows = [
+        *client.get(f"/api/uploads/{upload_id}/entries?page=1&page_size=100").json()["items"],
+        *client.get(f"/api/uploads/{upload_id}/entries?page=2&page_size=100").json()["items"],
+    ]
+    ids_in_dataset = {entry["id"] for entry in dataset_rows}
+    assert all(entry["id"] in ids_in_dataset for entry in body["evidence"])
+
+
+def test_explicit_endpoint_search_does_not_return_matches_from_another_dataset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ordinary = "\n".join(
+        _access_record(index // 60, index % 60, f"/m/other/{index}", 200)
+        for index in range(120)
+    ).encode()
+    first = client.post("/api/uploads", files={"file": ("ordinary.log", ordinary, "text/plain")})
+    second = client.post(
+        "/api/uploads",
+        files={
+            "file": (
+                "target.log",
+                _access_record(4, 0, "/m/guaranteeDays", 500).encode(),
+                "text/plain",
+            )
+        },
+    )
+    assert first.status_code == second.status_code == 201
+    provider_called = False
+
+    def fake_completion(*_args):
+        nonlocal provider_called
+        provider_called = True
+        return completed("A provider answer should not be needed.")
+
+    monkeypatch.setattr("backend.app.ai._request_llm_completion", fake_completion)
+    response = ask(
+        client,
+        first.json()["id"],
+        "Find HTTP 500 for /m/guaranteeDays",
+    )
+
+    assert response.status_code == 200
+    assert "No log entries matching" in response.json()["answer"]
+    assert response.json()["evidence"] == []
+    assert response.json()["cited_evidence"] == []
+    assert provider_called is False
+
+
 def test_relevant_unparsed_entries_are_identified_as_unparsed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
