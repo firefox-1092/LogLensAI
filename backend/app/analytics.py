@@ -28,6 +28,11 @@ _REQUEST_ID = re.compile(
     r"(?i)(?P<prefix>\b(?:x[-_ ]?request|request|correlation|trace)[-_ ]?id\b\s*[=:]\s*)"
     r"(?P<value>[a-z0-9][a-z0-9._-]{5,})"
 )
+_ACCESS_ERROR_MESSAGE = re.compile(
+    r"^client_ip=\S+ \| HTTP (?P<status>[45]\d\d) \| "
+    r"(?P<method>[!#$%&'*+.^_`|~0-9A-Za-z-]+)\s+"
+    r"(?P<target>.+?)\s+(?P<protocol>HTTP/\d(?:\.\d)?) \|"
+)
 _SEVERITIES = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "CRITICAL")
 _ERROR_LEVELS = {"ERROR", "FATAL", "CRITICAL"}
 
@@ -61,6 +66,16 @@ def _replace_volatile_values(message: str, *, ip_placeholder: str = "<IP>") -> s
 
 def normalize_error_message(message: str) -> str:
     """Normalize volatile identifiers while retaining meaningful values like status codes."""
+    access_error = _ACCESS_ERROR_MESSAGE.match(message)
+    if access_error:
+        # Request query values, client addresses, timestamps, response sizes,
+        # referers, and user agents vary per request and should not split a
+        # repeated server-side HTTP failure into separate patterns.
+        target = access_error.group("target").split("?", 1)[0]
+        return " ".join(
+            f"http {access_error.group('status')} {access_error.group('method')} "
+            f"{target} {access_error.group('protocol')}".casefold().split()
+        )
     return " ".join(_replace_volatile_values(message).casefold().split())
 
 

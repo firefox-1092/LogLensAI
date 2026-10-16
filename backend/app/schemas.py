@@ -144,7 +144,7 @@ class InvestigationNodeDraft(BaseModel):
     status: Literal["observed", "suggested", "unverified"]
     title: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=1, max_length=500)
-    evidence_lines: list[int] = Field(default_factory=list, max_length=12)
+    evidence_lines: list[Annotated[int, Field(strict=True)]] = Field(default_factory=list, max_length=12)
     source_refs: list[str] = Field(default_factory=list, max_length=5)
 
 
